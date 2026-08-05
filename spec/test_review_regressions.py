@@ -8,6 +8,7 @@ reading a field the passive path never sets.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -837,9 +838,14 @@ def test_admin_token_follows_the_data_directory(tmp_path, monkeypatch):
     token = generate_token()
     written = save_admin_token(token)
     assert written.parent == tmp_path
-    assert oct(written.stat().st_mode)[-3:] == "600"
+    if os.name != "nt":
+        # Windows has no Unix permission bits; chmod is a no-op there.
+        assert oct(written.stat().st_mode)[-3:] == "600"
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Unix file-permission bits do not apply on Windows"
+)
 def test_token_read_survives_an_unreadable_directory(tmp_path):
     """ProtectHome= makes the service user's home unreadable.
 
@@ -847,7 +853,6 @@ def test_token_read_survives_an_unreadable_directory(tmp_path):
     and letting it escape killed the whole backend event loop -- packet
     capture died while the web server kept serving.
     """
-    import os
     from leetha.auth.tokens import _read_token_file
 
     blocked = tmp_path / "blocked"
