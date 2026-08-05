@@ -188,10 +188,14 @@ class _MQTTImporterBase(BaseImporter):
         """
         try:
             import aiomqtt
-        except ImportError:
+        except Exception as err:
+            # Not just ImportError: aiomqtt pulls in paho -> dnspython ->
+            # service_identity -> pyOpenSSL, so a broken transitive
+            # dependency surfaces as AttributeError at import time. An
+            # importer must never take the caller down with it.
             log.error(
-                "%s importer needs the 'aiomqtt' package "
-                "(pip install aiomqtt)", self.name,
+                "%s importer could not load 'aiomqtt' (%s: %s)",
+                self.name, type(err).__name__, err,
             )
             return None
 

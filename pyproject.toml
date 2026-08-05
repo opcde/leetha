@@ -25,14 +25,11 @@ dependencies = [
     "prometheus-client>=0.20",
     "cryptography>=44.0.1",
     "asyncssh>=2.14.2",
+    # Zigbee2MQTT and Z-Wave JS importers read the controller's retained
+    # device list off an MQTT broker.
+    "aiomqtt>=2.0",
     "pyreadline3>=3.4; sys_platform == 'win32'",
 ]
-
-[project.optional-dependencies]
-# Zigbee2MQTT and Z-Wave JS importers read the controller's retained device
-# list off an MQTT broker. Kept optional so the core install stays lean --
-# both importers log a clear message and no-op when it is absent.
-mqtt = ["aiomqtt>=2.0"]
 
 [project.scripts]
 leetha = "leetha.cli:main"

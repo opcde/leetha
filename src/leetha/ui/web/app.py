@@ -333,6 +333,16 @@ _WIKI_PAGES = [
     ("spoofing-detection", "Spoofing-Detection.md", "Spoofing Detection"),
     ("web-dashboard", "Web-Dashboard.md", "Web Dashboard"),
     ("cli-reference", "CLI-Reference.md", "CLI Reference"),
+    # These pages ship in the package but were missing from the registry,
+    # so the built-in docs viewer could not reach them.
+    ("inventory-sources", "Inventory-Sources.md", "Inventory Sources"),
+    ("device-authorization", "Device-Authorization.md", "Device Authorization"),
+    ("custom-properties", "Custom-Properties.md", "Custom Properties"),
+    ("presence-monitoring", "Presence-Monitoring.md", "Presence Monitoring"),
+    ("pcap-import", "PCAP-Import.md", "PCAP Import"),
+    ("remote-sensors", "Remote-Sensors.md", "Remote Sensors"),
+    ("authentication", "Authentication.md", "Authentication"),
+    ("notifications", "Notifications.md", "Notifications"),
 ]
 
 _WIKI_SLUG_MAP = {slug: (fn, title) for slug, fn, title in _WIKI_PAGES}

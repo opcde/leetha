@@ -56,9 +56,18 @@ The React dashboard exposes the same functionality at `/sync` with real-time dow
 
 ### TLS Client Identification
 
-**JA3 Fingerprint Database** -- 150+ archived TLS ClientHello fingerprints. JA3 is an MD5 hash over cipher suites, extensions, elliptic curves, and EC point formats.
+**JA3 Fingerprint Database** -- 598 TLS ClientHello fingerprints from the Trisul set, covering browsers, mobile apps, and desktop clients. JA3 is an MD5 hash over cipher suites, extensions, elliptic curves, and EC point formats.
 
-**JA4+ Fingerprint Database** -- 2,000+ modern TLS fingerprints from FoxIO spanning JA4 (client), JA4S (server), JA4H (HTTP), JA4X (certificate), and JA4T (TCP) variants. More collision-resistant than JA3.
+Leetha previously used Salesforce's `osx-nix-ja3.csv`, but that repository is archived and the list only covered 157 macOS/Linux **desktop applications**. The Trisul set is actively maintained and a near-superset -- it carries 155 of those 157 hashes plus mobile-app and browser fingerprints. Records identifying malware or scanner traffic are dropped at ingest: they carry no vendor, OS, or device type, and leetha identifies devices rather than threats.
+
+Trisul ships no explicit OS field, so leetha infers one from each description -- 124 entries resolve an OS family, and Android/iOS app fingerprints additionally imply a handset.
+
+**JA4+ Fingerprint Database** -- 70 mappings from FoxIO's `ja4plus-mapping.csv`. More collision-resistant than JA3.
+
+> **Note:** the full JA4 database moved from `ja4db.com/api/read/` to
+> `ja4db.foxio.io/api/ja4/` and now requires an account (`403` without
+> credentials). The GitHub-hosted CSV is the only unauthenticated JA4 source
+> FoxIO publishes, so coverage is limited to what it contains.
 
 *PatternLoader pipeline:* The TLS processor computes both JA3 and JA4 from each ClientHello and queries both databases. Matches reveal the application (browser, curl, Python requests) and by extension the likely OS.
 
@@ -77,8 +86,10 @@ The React dashboard exposes the same functionality at `/sync` with real-time dow
   Huginn dhcpv6 JSON    -->    huginn_dhcpv6.json
   Huginn dhcpv6_ent     -->    huginn_dhcpv6_enterprise.json
   IANA enterprise-num   -->    iana_enterprise.json
-  JA3 CSV               -->    ja3.json
-  JA4 API JSON          -->    ja4.json
+  Satori JSON (x7)      -->    satori_*.json
+  Recog XML (19 files)  -->    recog.json
+  Trisul JA3 JSONL      -->    ja3.json
+  JA4 mapping CSV       -->    ja4.json
                                     |
                                     v
                               PatternLoader
@@ -125,3 +136,20 @@ leetha validate --check oui       # OUI accuracy
 leetha validate --check stale     # outdated sources
 leetha validate --verbose         # per-host detail
 ```
+
+---
+
+## Retired Feeds
+
+Feeds are removed when they cannot pay their way. A retired feed's cache file
+is deleted automatically on the next full `leetha sync`, so a dropped source
+does not linger on disk.
+
+| Feed | Why it was removed |
+|---|---|
+| `huginn_mac_vendors` | 99.7% `Unknown MAC Vendor (xxxxxx)` placeholder rows -- a full 24-bit enumeration adding only 5 real vendors beyond the IEEE OUI database, at a 700 MB cost. |
+| `satori_ntp` | Its lookup key encodes Satori's own undocumented timestamp heuristics (`set`/`unset`, `current`/`random`) and the field count is inconsistent (7 vs 8), so the key cannot be reconstructed from an observed NTP header. Its 25 identities are covered more reliably by DHCP, mDNS, OUI, and TCP fingerprints. |
+
+Retired caches are pruned only after a **full** sync that completed without
+failures -- never after a single-source run, which has no view of the whole
+catalogue.

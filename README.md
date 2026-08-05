@@ -174,6 +174,37 @@ Retrieve the admin token with:
 sudo cat /var/lib/leetha/admin-token
 ```
 
+### Inventory integrations
+
+Beyond passive capture, leetha can import devices from systems that already
+know about them. Configure these from **Sync → Inventory Sources** in the web
+UI, or via the inventory API.
+
+| Importer | What it adds | Credentials |
+|---|---|---|
+| `dhcp_leases` | Hosts from ISC dhcpd / dnsmasq lease files | none (local file) |
+| `proxmox` | Nodes, VMs, and LXC containers — correlates captured MACs to named guests and their hypervisor | read-only `PVEAuditor` API token |
+| `zigbee2mqtt` | Paired Zigbee devices | MQTT broker (optional auth) |
+| `zwave_js` | Z-Wave nodes from Z-Wave JS UI | MQTT broker (optional auth) |
+
+The Zigbee and Z-Wave importers matter because those devices **never touch
+IP** — no amount of passive listening will ever see them. Zigbee EUI-64
+addresses embed a real IEEE OUI, so imported devices still resolve a vendor
+through the normal lookup.
+
+Creating the Proxmox token:
+
+```bash
+pveum user add leetha@pve
+pveum aclmod / --users leetha@pve --roles PVEAuditor
+pveum user token add leetha@pve inventory --privsep 0
+```
+
+Secrets are held in the AES-GCM credential store under the data directory,
+never in plaintext config. See the
+[Inventory Sources](docs/wiki/Inventory-Sources.md) wiki page for the full
+config schema of each importer.
+
 ### Docker customization
 
 Leetha reads `LEETHA_*` environment variables as defaults for its CLI flags, so you can customize the web listener without rebuilding the image. CLI flags (passed after the image name, or via compose's `command:`) always take precedence.

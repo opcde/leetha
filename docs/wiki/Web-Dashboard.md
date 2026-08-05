@@ -219,6 +219,43 @@ The React frontend includes several additional routes beyond the primary pages d
 | `/adapters` | Interface management (alias for `/interfaces`) |
 | `/docs` | Built-in knowledge base with searchable documentation |
 
+### Topology Export and Share Links
+
+The topology page has an **Export SVG** button and a **Share** dropdown.
+
+**Export** renders the current map server-side and downloads it as a
+standalone SVG, so it can be dropped into a report or ticket. The layout is
+deterministic (internet → infrastructure → endpoints) rather than a force
+simulation, so re-exporting an unchanged network produces an identical file.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  https://leetha.lan/api/topology/export.svg -o topology.svg
+```
+
+**Share links** give someone a read-only snapshot without provisioning an
+account:
+
+| Method | Route | Role | Purpose |
+|---|---|---|---|
+| `GET` | `/api/topology/export.svg` | any | Download the current map |
+| `GET` | `/api/topology/share` | any | Report whether a link is active |
+| `POST` | `/api/topology/share` | admin | Mint or rotate the key |
+| `DELETE` | `/api/topology/share` | admin | Revoke the link |
+| `GET` | `/share/{key}/topology.svg` | none | The read-only snapshot |
+
+Security properties worth knowing:
+
+- A share key is **not an API token**. It is stored in its own file as a
+  SHA-256 digest, verified with a constant-time compare, and consulted only by
+  the share endpoint. A leaked link exposes the picture and nothing else.
+- The raw key is returned **once**, at creation. Rotating immediately
+  invalidates any previously issued link.
+- `/share/` is exempt from API authentication by design — the key in the URL
+  *is* the credential. An invalid or revoked key returns `404`, not `403`, so
+  the endpoint does not confirm whether a link ever existed.
+- Device-supplied hostnames are escaped before rendering.
+
 ### API Rate Limiting
 
 All REST API endpoints are rate-limited to **120 requests per minute per IP address**. Exceeding this limit returns HTTP 429 (Too Many Requests) with a `Retry-After` header. WebSocket connections are not rate-limited.
