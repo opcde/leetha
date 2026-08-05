@@ -641,7 +641,7 @@ class LeethaApp:
             "p0f", "ja3", "ja4", "iana_enterprise",  # tiny files first
             "satori_dhcp", "satori_useragent", "satori_tcp",  # Satori (all <1MB)
             "satori_smb", "satori_ssh", "satori_web",
-            "satori_sip", "satori_ntp",
+            "satori_sip",
             "huginn_combinations", "huginn_dhcpv6",
             "huginn_dhcp_vendor", "huginn_dhcpv6_enterprise",
             "huginn_devices",

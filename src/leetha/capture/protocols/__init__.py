@@ -80,18 +80,25 @@ PARSER_CHAIN = [
 # ---------------------------------------------------------------------------
 from leetha.capture.protocols._legacy import (  # noqa: F401, E402
     ParsedPacket,
-    parse_tcp_syn,
-    parse_dhcpv4,
-    parse_dhcpv6,
-    parse_mdns,
-    parse_arp,
-    parse_ssdp,
-    parse_llmnr_netbios,
-    parse_tls_client_hello,
-    parse_dns,
-    parse_dns_answer,
-    parse_icmpv6,
-    parse_ip_observed,
-    parse_http_useragent,
     _guess_initial_ttl,
 )
+
+# The un-prefixed parser names resolve to the parsers PARSER_CHAIN actually
+# runs. They previously pointed at the _legacy copies, so the obvious import
+# -- ``from leetha.capture.protocols import parse_dhcpv6`` -- silently
+# handed back a stale duplicate that missed fixes made to the live parser.
+# The _legacy implementations remain importable from their own module for
+# anything that specifically needs the old ParsedPacket return type.
+parse_arp = _new_parse_arp
+parse_dhcpv4 = _new_parse_dhcpv4
+parse_dhcpv6 = _new_parse_dhcpv6
+parse_dns = _new_parse_dns
+parse_dns_answer = _new_parse_dns_answer
+parse_http_useragent = _new_parse_http_useragent
+parse_icmpv6 = _new_parse_icmpv6
+parse_ip_observed = _new_parse_ip_observed
+parse_llmnr_netbios = _new_parse_llmnr_netbios
+parse_mdns = _new_parse_mdns
+parse_ssdp = _new_parse_ssdp
+parse_tcp_syn = _new_parse_tcp_syn
+parse_tls_client_hello = _new_parse_tls_client_hello

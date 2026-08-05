@@ -145,11 +145,70 @@ def parse_dhcp_server(packet) -> CapturedPacket | None:
     )
 
 
+_DUID_TYPE_NAMES = {1: "LLT", 2: "EN", 3: "LL", 4: "UUID"}
+
+
+def _decode_duid(raw_duid) -> tuple[str | None, str | None, str | None, int | None]:
+    """Unpack a DHCPv6 DUID into (hex, type_name, embedded_mac, enterprise_num).
+
+    RFC 8415 defines four DUID forms, and two of them carry identity we
+    otherwise never see:
+
+    * DUID-EN (type 2) embeds an IANA Private Enterprise Number, which
+      names the vendor directly.
+    * DUID-LLT / DUID-LL (types 1 and 3) embed the client's link-layer
+      address, which survives IPv6 privacy addressing and MAC
+      randomisation on the v6 side.
+
+    Returns ``(None, None, None, None)`` for anything unparseable.
+    """
+    try:
+        from scapy.compat import raw as _raw
+    except ImportError:  # pragma: no cover - scapy always ships this
+        return (None, None, None, None)
+
+    if isinstance(raw_duid, (bytes, bytearray)):
+        blob = bytes(raw_duid)
+    else:
+        try:
+            blob = _raw(raw_duid)
+        except Exception:
+            return (None, None, None, None)
+
+    if len(blob) < 3:
+        return (None, None, None, None)
+
+    duid_hex = blob.hex()
+    type_code = int.from_bytes(blob[0:2], "big")
+    type_name = _DUID_TYPE_NAMES.get(type_code)
+    if type_name is None:
+        return (duid_hex, str(type_code), None, None)
+
+    mac = None
+    enterprise = None
+
+    if type_code == 2:
+        # 2-byte type | 4-byte enterprise number | variable identifier
+        if len(blob) >= 6:
+            enterprise = int.from_bytes(blob[2:6], "big")
+    elif type_code == 1:
+        # 2-byte type | 2-byte hwtype | 4-byte time | link-layer address
+        if len(blob) >= 14 and int.from_bytes(blob[2:4], "big") == 1:
+            mac = ":".join(f"{b:02x}" for b in blob[8:14])
+    elif type_code == 3:
+        # 2-byte type | 2-byte hwtype | link-layer address
+        if len(blob) >= 10 and int.from_bytes(blob[2:4], "big") == 1:
+            mac = ":".join(f"{b:02x}" for b in blob[4:10])
+
+    return (duid_hex, type_name, mac, enterprise)
+
+
 def parse_dhcpv6(packet) -> CapturedPacket | None:
     """Extract DHCPv6 fields from scapy packet (UDP 546/547).
 
-    Extracts: message type, DUID, ORO (option 6), Vendor Class (option 16),
-    Enterprise ID, Client FQDN (option 39).
+    Extracts: message type, DUID (type, embedded MAC, embedded enterprise
+    number), ORO (option 6), Vendor Class (option 16), Enterprise ID,
+    Client FQDN (option 39).
     """
     try:
         from scapy.layers.inet6 import IPv6, UDP
@@ -178,10 +237,14 @@ def parse_dhcpv6(packet) -> CapturedPacket | None:
             oro = ",".join(str(x) for x in oro_layer.reqopts)
 
     duid = None
+    duid_type = None
+    duid_mac = None
+    duid_enterprise = None
     if packet.haslayer(DHCP6OptClientId):
         client_id = packet[DHCP6OptClientId]
-        if hasattr(client_id, 'duid') and client_id.duid:
-            duid = client_id.duid.hex() if isinstance(client_id.duid, bytes) else str(client_id.duid)
+        raw_duid = getattr(client_id, "duid", None)
+        if raw_duid:
+            duid, duid_type, duid_mac, duid_enterprise = _decode_duid(raw_duid)
 
     vendor_class = None
     enterprise_id = None
@@ -210,8 +273,18 @@ def parse_dhcpv6(packet) -> CapturedPacket | None:
         fields={
             "oro": oro,
             "duid": duid,
+            "duid_type": duid_type,
+            # Link-layer address embedded in a DUID-LLT/LL. Survives IPv6
+            # privacy addressing, so it ties a v6-only host back to its MAC.
+            "duid_mac": duid_mac,
             "vendor_class": vendor_class,
-            "enterprise_id": enterprise_id,
+            # Option 16 states the enterprise explicitly; a DUID-EN only
+            # implies it, so prefer the option when both are present.
+            "enterprise_id": enterprise_id if enterprise_id is not None else duid_enterprise,
+            "enterprise_id_source": (
+                "vendor_class" if enterprise_id is not None
+                else ("duid_en" if duid_enterprise is not None else None)
+            ),
             "fqdn": fqdn,
         },
         raw=bytes(packet) if hasattr(packet, '__bytes__') else None,

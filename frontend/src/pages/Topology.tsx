@@ -18,12 +18,15 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import ELK from "elkjs/lib/elk.bundled.js";
-import { fetchTopology, createTopologyOverride, deleteTopologyOverride } from "@/lib/api";
+import {
+  fetchTopology, createTopologyOverride, deleteTopologyOverride,
+  fetchTopologyShareStatus, createTopologyShareLink, revokeTopologyShareLink,
+} from "@/lib/api";
 import { toast } from "sonner";
 import { TopologyNode } from "@/components/topology/TopologyNode";
 import { DeviceDrawer } from "@/components/shared/DeviceDrawer";
 import { DEVICE_TYPE_COLORS } from "@/lib/constants";
-import { Loader2, Filter, ChevronDown, Maximize, X } from "lucide-react";
+import { Loader2, Filter, ChevronDown, Maximize, X, Download, Share2, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const elk = new ELK();
@@ -126,6 +129,39 @@ function TopologyInner({ subscribe }: TopologyInnerProps) {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [drawerMac, setDrawerMac] = useState<string | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareEnabled, setShareEnabled] = useState(false);
+  // Held only in memory: the server stores just a digest, so this is the
+  // one and only time the raw key can be shown.
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchTopologyShareStatus()
+      .then((r) => setShareEnabled(r.enabled))
+      .catch(() => setShareEnabled(false));
+  }, []);
+
+  const handleCreateShare = useCallback(async () => {
+    try {
+      const res = await createTopologyShareLink();
+      setShareUrl(`${window.location.origin}${res.url}`);
+      setShareEnabled(true);
+      toast.success("Share link created", { description: res.note });
+    } catch {
+      toast.error("Could not create share link");
+    }
+  }, []);
+
+  const handleRevokeShare = useCallback(async () => {
+    try {
+      await revokeTopologyShareLink();
+      setShareUrl(null);
+      setShareEnabled(false);
+      toast.success("Share link revoked");
+    } catch {
+      toast.error("Could not revoke share link");
+    }
+  }, []);
   const filterRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { fitView } = useReactFlow();
@@ -399,6 +435,81 @@ function TopologyInner({ subscribe }: TopologyInnerProps) {
 
       {/* Floating toolbar — top left */}
       <div className="absolute top-3 left-3 flex items-center gap-2 z-10">
+        {/* Export the current map as SVG for reports and tickets */}
+        <Button
+          variant="outline"
+          size="sm"
+          asChild
+          className="bg-card/90 backdrop-blur-sm border-border/60 shadow-lg gap-1.5"
+        >
+          <a href="/api/topology/export.svg" download="leetha-topology.svg">
+            <Download className="h-3.5 w-3.5" />
+            Export SVG
+          </a>
+        </Button>
+
+        {/* Read-only share link */}
+        <div className="relative">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShareOpen(!shareOpen)}
+            className="bg-card/90 backdrop-blur-sm border-border/60 shadow-lg gap-1.5"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+            Share
+            {shareEnabled && (
+              <span className="ml-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            )}
+          </Button>
+
+          {shareOpen && (
+            <div className="absolute top-full mt-2 left-0 w-80 rounded-md border border-border/60 bg-card/95 backdrop-blur-sm shadow-xl p-3 space-y-2 z-20">
+              <p className="text-xs text-muted-foreground">
+                Anyone with the link can view a read-only snapshot of this map.
+                It grants no API access.
+              </p>
+              {shareUrl ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    readOnly
+                    value={shareUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 text-[11px] bg-muted/50 rounded px-2 py-1 font-mono"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(shareUrl);
+                      toast.success("Link copied");
+                    }}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ) : (
+                shareEnabled && (
+                  <p className="text-[11px] text-muted-foreground">
+                    A link is active. The key is only shown when created —
+                    generate a new one to see it, which revokes the old link.
+                  </p>
+                )
+              )}
+              <div className="flex gap-2 pt-1">
+                <Button size="sm" onClick={handleCreateShare} className="flex-1">
+                  {shareEnabled ? "Rotate link" : "Create link"}
+                </Button>
+                {shareEnabled && (
+                  <Button size="sm" variant="outline" onClick={handleRevokeShare}>
+                    Revoke
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Filter dropdown */}
         <div ref={filterRef} className="relative">
           <Button

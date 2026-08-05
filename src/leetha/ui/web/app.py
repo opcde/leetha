@@ -14,7 +14,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi import (
+    FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File,
+    HTTPException,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
@@ -2626,6 +2629,79 @@ async def api_top_connections():
 
 
 _topology_cache: dict = {"data": None, "ts": 0}
+
+
+@fastapi_app.get("/api/topology/export.svg")
+async def api_topology_export_svg():
+    """Render the current topology as a standalone SVG document."""
+    from fastapi.responses import Response
+    from leetha.ui.web.topology_export import render_topology_svg
+
+    graph = await api_topology()
+    svg = render_topology_svg(graph)
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": 'attachment; filename="leetha-topology.svg"'},
+    )
+
+
+@fastapi_app.get("/api/topology/share")
+async def api_topology_share_status():
+    """Report whether a read-only share link is currently active."""
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import share_key_exists
+
+    return {"enabled": share_key_exists(get_config().data_dir)}
+
+
+@fastapi_app.post("/api/topology/share")
+async def api_topology_share_create():
+    """Mint (or rotate) the read-only share key.
+
+    The raw key is returned exactly once -- only its digest is stored -- so
+    rotating immediately invalidates any previously issued link.
+    """
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import create_share_key
+
+    key = create_share_key(get_config().data_dir)
+    return {
+        "key": key,
+        "url": f"/share/{key}/topology.svg",
+        "note": "Shown once. Rotating or revoking invalidates existing links.",
+    }
+
+
+@fastapi_app.delete("/api/topology/share")
+async def api_topology_share_revoke():
+    """Revoke the share link."""
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import revoke_share_key
+
+    return {"revoked": revoke_share_key(get_config().data_dir)}
+
+
+@fastapi_app.get("/share/{key}/topology.svg")
+async def api_shared_topology_svg(key: str):
+    """Read-only topology snapshot for holders of a valid share key.
+
+    Exempt from API auth by design, but the key grants nothing except this
+    picture -- it is never accepted as an API token.
+    """
+    from fastapi.responses import Response
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import render_topology_svg, verify_share_key
+
+    if not verify_share_key(key, get_config().data_dir):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    graph = await api_topology()
+    return Response(
+        content=render_topology_svg(graph),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @fastapi_app.get("/api/topology/overrides")

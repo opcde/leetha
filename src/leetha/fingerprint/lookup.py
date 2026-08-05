@@ -27,6 +27,9 @@ from leetha.patterns.matching import (
 
 _log = logging.getLogger(__name__)
 
+# Recog interpolates other params by name, e.g. "{hw.model} Firmware".
+_RECOG_TEMPLATE_RE = re.compile(r"\{([a-z0-9_.]+)\}", re.IGNORECASE)
+
 # ---------------------------------------------------------------------------
 # Device-type -> high-level category mapping
 # ---------------------------------------------------------------------------
@@ -652,7 +655,58 @@ class SignatureMatcher:
         "http_server": "http_header.server",
         "http_cookie": "http_header.cookie",
         "http_xpoweredby": "http_header.x-powered-by",
+        # telnet_banners.xml carries no "matches" attribute upstream, so
+        # the sync keys it by filename.
+        "telnet": "telnet_banners",
+        "rtsp": "rtsp_header.server",
+        "ldap": "ldap.search_result",
+        "mdns_device_info": "mdns.device-info.txt",
+        "dhcp_vendor_class": "dhcp_vendor_class",
+        "sip_user_agent": "sip_header.user_agent",
     }
+
+    @staticmethod
+    def _strip_banner_framing(kind: str, text: str) -> str:
+        """Remove protocol framing that Recog patterns don't include.
+
+        Recog anchors its patterns (``^...$``) on the *payload* of a
+        greeting, not the wire bytes: ``OpenSSH_8.4p1`` rather than
+        ``SSH-2.0-OpenSSH_8.4p1``, and ``mail ESMTP Postfix`` rather than
+        ``220 mail ESMTP Postfix``. Passing the raw banner through makes
+        every anchored pattern miss.
+        """
+        kind = kind.lower()
+
+        # Telnet banners are deliberately multi-line -- Recog anchors whole
+        # login screens with \A and embedded newlines -- so collapsing to
+        # the first line would throw away what the patterns match on.
+        if kind == "telnet":
+            return text.strip()
+
+        cleaned = text.strip().split("\r\n")[0].split("\n")[0].strip()
+
+        if kind == "ssh":
+            # SSH-<protoversion>-<softwareversion> [comments]
+            if cleaned.upper().startswith("SSH-"):
+                parts = cleaned.split("-", 2)
+                if len(parts) == 3:
+                    cleaned = parts[2]
+        elif kind in ("ftp", "smtp"):
+            # Numeric reply code, optionally with a '-' continuation marker.
+            m = re.match(r"^\d{3}[ -]+(.*)$", cleaned)
+            if m:
+                cleaned = m.group(1)
+        elif kind in ("pop", "pop3"):
+            m = re.match(r"^\+OK\s+(.*)$", cleaned, re.IGNORECASE)
+            if m:
+                cleaned = m.group(1)
+        elif kind in ("imap", "imap4"):
+            # "* OK [CAPABILITY ...] <banner>"
+            m = re.match(r"^\*\s+OK\s+(?:\[[^\]]*\]\s*)?(.*)$", cleaned, re.IGNORECASE)
+            if m:
+                cleaned = m.group(1)
+
+        return cleaned.strip()
 
     def match_recog(self, kind: str, text: str) -> FingerprintMatch | None:
         """Match a banner/header against the Rapid7 Recog fingerprint DB.
@@ -670,7 +724,22 @@ class SignatureMatcher:
         blob = self._fetch_json("recog")
         if not blob:
             return None
+        # Recog patterns assume protocol framing has been stripped; try the
+        # cleaned form first, then the original in case it was already clean.
+        candidates = [self._strip_banner_framing(kind, text)]
+        if text not in candidates:
+            candidates.append(text)
         fingerprints = blob.get("entries", {}).get(match_type, [])
+        for cand in candidates:
+            hit = self._match_recog_fingerprints(fingerprints, cand, match_type)
+            if hit:
+                return hit
+        return None
+
+    def _match_recog_fingerprints(
+        self, fingerprints: list, text: str, match_type: str
+    ) -> FingerprintMatch | None:
+        """Walk one Recog match-type's fingerprints against *text*."""
         for fp in fingerprints:
             pattern = fp.get("pattern")
             if not pattern:
@@ -682,7 +751,8 @@ class SignatureMatcher:
             if not m:
                 continue
 
-            vendor = product = os_family = device_type = version = None
+            # Pass 1: resolve each param to a literal or a capture group.
+            resolved: dict[str, str] = {}
             for p in fp.get("params", []):
                 name = p.get("name", "")
                 val = p.get("value")
@@ -691,6 +761,23 @@ class SignatureMatcher:
                         val = m.group(p["pos"])
                     except Exception:
                         val = None
+                if name and val:
+                    resolved.setdefault(name, val)
+
+            # Pass 2: Recog params may reference other params by name, e.g.
+            # hw.product="{hw.model} Firmware". Without this the literal
+            # "{hw.model} Firmware" was surfaced as the device's model.
+            def _interpolate(value: str) -> str:
+                return _RECOG_TEMPLATE_RE.sub(
+                    lambda ref: resolved.get(ref.group(1), ""), value
+                ).strip()
+
+            vendor = product = os_family = device_type = version = None
+            for p in fp.get("params", []):
+                name = p.get("name", "")
+                val = resolved.get(name)
+                if val and "{" in val:
+                    val = _interpolate(val)
                 if not val:
                     continue
                 if name in ("service.vendor", "hw.vendor", "os.vendor") and not vendor:
@@ -898,6 +985,26 @@ class SignatureMatcher:
                     raw_data={"vendor_class": opt60},
                 ))
 
+        # Option 60 -- self-describing vendor class. Network printers and
+        # some appliances announce themselves outright, e.g.
+        # "Mfg=Hewlett Packard;Typ=Printer;Mod=HP LaserJet 400 M401n".
+        # Reading the observed string beats a table lookup, which can only
+        # match devices whose exact serial-bearing string was collected
+        # upstream.
+        if opt60:
+            from leetha.sync.parsers import _parse_vendor_class_fields
+            structured = _parse_vendor_class_fields(opt60)
+            if structured:
+                hits.append(FingerprintMatch(
+                    source="dhcp_vendor_class",
+                    match_type="exact",
+                    confidence=0.90,
+                    manufacturer=structured.get("vendor"),
+                    device_type=(structured.get("device_type") or "").lower() or None,
+                    model=structured.get("model"),
+                    raw_data={"vendor_class": opt60, "parsed": structured},
+                ))
+
         # Option 60 -- Huginn vendor class
         if opt60:
             hv = self._resolve_huginn_dhcp_vendor(opt60)
@@ -1040,37 +1147,70 @@ class SignatureMatcher:
         self._store[key] = idx
         return idx
 
-    def _resolve_huginn_dhcp_vendor(self, opt60: str) -> FingerprintMatch | None:
-        """Find the best Huginn vendor-class substring match for *opt60*."""
+    def _dhcp_vendor_candidates(self) -> list[tuple[str, dict]] | None:
+        """Prepared ``(value_lower, record)`` pairs for vendor-class matching.
+
+        Built once: the table has ~450K rows, so lowercasing every value on
+        each lookup dominated the cost of this hot path.
+        """
+        key = "_dhcp_vendor_prepared"
+        if key in self._store:
+            return self._store[key]
+
         blob = self._fetch_json("huginn_dhcp_vendor")
         if not blob:
             return None
 
-        rows = blob.get("entries", {})
-        opt60_lc = opt60.lower()
+        prepared = [
+            (rec["value"].lower(), rec)
+            for rec in blob.get("entries", {}).values()
+            if isinstance(rec, dict) and rec.get("value")
+        ]
+        self._store[key] = prepared
+        return prepared
 
-        winner = None
-        winner_len = 0
+    def _resolve_huginn_dhcp_vendor(self, opt60: str) -> FingerprintMatch | None:
+        """Find the best Huginn vendor-class substring match for *opt60*."""
+        prepared = self._dhcp_vendor_candidates()
+        if not prepared:
+            return None
 
-        for _vid, rec in rows.items():
-            val = rec.get("value", "")
-            if not val:
-                continue
-            val_lc = val.lower()
-            if opt60_lc.startswith(val_lc) or val_lc in opt60_lc:
-                if len(val) > winner_len:
+        # Vendor class strings repeat heavily across a network (every
+        # Windows host sends "MSFT 5.0"), so memoise per opt60.
+        memo = self._store.setdefault("_dhcp_vendor_memo", {})
+        if opt60 in memo:
+            winner = memo[opt60]
+        else:
+            opt60_lc = opt60.lower()
+            winner = None
+            winner_len = 0
+            for val_lc, rec in prepared:
+                if len(val_lc) > winner_len and (
+                    opt60_lc.startswith(val_lc) or val_lc in opt60_lc
+                ):
                     winner = rec
-                    winner_len = len(val)
+                    winner_len = len(val_lc)
+            memo[opt60] = winner
 
         if not winner:
             return None
 
         mfr = winner.get("vendor_hint", "")
+        device_type = winner.get("device_type")
+        model = winner.get("model")
+        # Most rows in this table carry no attribution at all. Emitting a
+        # 0.75-confidence match with no vendor, type, or model adds weight
+        # to the verdict while saying nothing, so skip those.
+        if not (mfr or device_type or model):
+            return None
+
         return FingerprintMatch(
             source="huginn_dhcp_vendor",
             match_type="substring",
             confidence=0.75,
             manufacturer=mfr or None,
+            device_type=(device_type or "").lower() or None,
+            model=model or None,
             raw_data={
                 "vendor_class": opt60,
                 "matched_value": winner.get("value"),
@@ -1173,12 +1313,38 @@ class SignatureMatcher:
                 )
         return None
 
-    def _resolve_huginn_dhcpv6_enterprise(self, eid: int) -> FingerprintMatch | None:
-        """Check the Huginn DHCPv6 enterprise table."""
+    def _dhcpv6_enterprise_index(self) -> dict[str, dict] | None:
+        """Reverse index: enterprise number -> record.
+
+        The cache is keyed by Huginn's internal row id, with the actual
+        IANA enterprise number in each record's ``value`` field. Looking
+        up by row id silently returns a different vendor entirely, so
+        index on ``value`` instead.
+        """
+        key = "_dhcpv6_ent_idx"
+        if key in self._store:
+            return self._store[key]
+
         blob = self._fetch_json("huginn_dhcpv6_enterprise")
         if not blob:
             return None
-        rec = blob.get("entries", {}).get(str(eid))
+
+        idx: dict[str, dict] = {}
+        for rec in blob.get("entries", {}).values():
+            if not isinstance(rec, dict):
+                continue
+            num = rec.get("value")
+            if num:
+                idx.setdefault(str(num), rec)
+        self._store[key] = idx
+        return idx
+
+    def _resolve_huginn_dhcpv6_enterprise(self, eid: int) -> FingerprintMatch | None:
+        """Check the Huginn DHCPv6 enterprise table."""
+        idx = self._dhcpv6_enterprise_index()
+        if not idx:
+            return None
+        rec = idx.get(str(eid))
         if not rec:
             return None
         org = rec.get("organization", "")
@@ -1198,7 +1364,14 @@ class SignatureMatcher:
         rec = blob.get("entries", {}).get(str(eid))
         if not rec:
             return None
-        org = rec.get("organization") or rec.get("name") or ""
+        # parse_iana_enterprise emits {enterprise_id: "Org Name"} -- a plain
+        # string. Older/alternate shapes used a dict, so accept both.
+        if isinstance(rec, str):
+            org = rec
+        elif isinstance(rec, dict):
+            org = rec.get("organization") or rec.get("name") or ""
+        else:
+            return None
         if not org:
             return None
         return FingerprintMatch(
@@ -1214,13 +1387,23 @@ class SignatureMatcher:
     # Satori fingerprint matching (generic across all Satori databases)
     # ------------------------------------------------------------------
 
-    def _satori_index(self, source_name: str, test_field: str) -> dict[str, dict]:
+    def _satori_index(
+        self, source_name: str, test_field: str, qualifier_field: str | None = None
+    ) -> dict[str, dict]:
         """Build or return an indexed lookup for a Satori source.
 
         Index maps lowercase match values to the best device metadata entry
         (highest weight wins when multiple entries match the same value).
+
+        When *qualifier_field* is given its value is prefixed onto the key.
+        The TCP feed needs this: the same signature string means different
+        devices depending on whether it came from a SYN or a SYN-ACK, so
+        matching on the signature alone would cross-contaminate the two.
         """
-        idx_key = f"_satori_idx_{source_name}"
+        # The field belongs in the cache key: satori_smb is indexed by both
+        # smbnativename and smbnativelanman, and a source-only key would
+        # serve the first field's index for the second field's lookup.
+        idx_key = f"_satori_idx_{source_name}_{test_field}_{qualifier_field or ''}"
         if idx_key in self._store:
             return self._store[idx_key] or {}
 
@@ -1238,6 +1421,9 @@ class SignatureMatcher:
                     continue
                 weight = int(test.get("weight", 0))
                 key = val.lower() if test.get("matchtype") != "exact" else val
+                if qualifier_field:
+                    qual = test.get(qualifier_field) or ""
+                    key = f"{qual}|{key}"
                 existing = idx.get(key)
                 if not existing or weight > existing.get("_weight", 0):
                     idx[key] = {
@@ -1254,19 +1440,23 @@ class SignatureMatcher:
         return idx
 
     def _match_satori(self, source_name: str, test_field: str,
-                      value: str, confidence: float = 0.80) -> FingerprintMatch | None:
+                      value: str, confidence: float = 0.80,
+                      qualifier_field: str | None = None,
+                      qualifier: str | None = None) -> FingerprintMatch | None:
         """Look up a value against a Satori fingerprint index."""
         if not value:
             return None
-        idx = self._satori_index(source_name, test_field)
+        idx = self._satori_index(source_name, test_field, qualifier_field)
         if not idx:
             return None
 
+        prefix = f"{qualifier or ''}|" if qualifier_field else ""
+
         # Try exact match first, then partial (substring) matches
-        hit = idx.get(value) or idx.get(value.lower())
+        hit = idx.get(f"{prefix}{value}") or idx.get(f"{prefix}{value.lower()}")
         if not hit:
             # Partial matching: check if any index key is a substring
-            val_lower = value.lower()
+            val_lower = f"{prefix}{value.lower()}"
             for pattern, entry in idx.items():
                 if entry.get("matchtype") == "partial" and pattern in val_lower:
                     if not hit or entry.get("_weight", 0) > hit.get("_weight", 0):
@@ -1297,12 +1487,45 @@ class SignatureMatcher:
         return self._match_satori("satori_ssh", "ssh", banner, 0.82)
 
     def match_satori_smb(self, native_os: str) -> FingerprintMatch | None:
-        """Match SMB native OS string against Satori SMB fingerprints."""
-        return self._match_satori("satori_smb", "smbnativename", native_os, 0.82)
+        """Match an SMB native OS / LAN Manager string against Satori.
+
+        The feed keys some devices on ``smbnativename`` and others on
+        ``smbnativelanman`` (a Dell printer answers "FXNIC 0.01" for one
+        and "FXNIC0.01" for the other), so try both indexes.
+        """
+        hit = self._match_satori("satori_smb", "smbnativename", native_os, 0.82)
+        if hit:
+            return hit
+        return self._match_satori("satori_smb", "smbnativelanman", native_os, 0.82)
 
     def match_satori_web(self, server: str) -> FingerprintMatch | None:
         """Match HTTP Server header against Satori web fingerprints."""
         return self._match_satori("satori_web", "webserver", server, 0.78)
+
+    def match_satori_sip(self, sip_server: str) -> FingerprintMatch | None:
+        """Match a SIP Server/User-Agent header against Satori SIP prints.
+
+        Every entry in this feed is a VoIP endpoint with both a vendor and
+        a device_type, which is otherwise hard to pin down passively.
+        """
+        return self._match_satori("satori_sip", "sipserver", sip_server, 0.82)
+
+    def match_satori_tcp(
+        self, tcp_sig: str, tcp_flags: str = "S"
+    ) -> FingerprintMatch | None:
+        """Match a Satori-format TCP signature against Satori TCP prints.
+
+        Complements p0f: this feed is where the ICS/PLC stacks live
+        (Allen-Bradley, ABB, Advantech, Siemens), and all of those are
+        SYN-ACK signatures because a PLC is a listening server.
+
+        *tcp_flags* is "S" for a client SYN or "SA" for a server SYN-ACK;
+        the two are indexed separately.
+        """
+        return self._match_satori(
+            "satori_tcp", "tcpsig", tcp_sig, 0.80,
+            qualifier_field="tcpflag", qualifier=tcp_flags,
+        )
 
     # ------------------------------------------------------------------
 
@@ -1392,6 +1615,7 @@ class SignatureMatcher:
                     match_type="exact",
                     confidence=0.72,
                     os_family=rec.get("os_family"),
+                    device_type=rec.get("device_type"),
                     raw_data={
                         "ja3_hash": hash_value,
                         "app": rec.get("app"),

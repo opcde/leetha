@@ -26,7 +26,7 @@
 - **Infrastructure-aware mDNS filtering** -- automatically detects routers/gateways/APs and suppresses forwarded multicast that would pollute device identity
 - **30 protocol banner matchers** -- passively reads service banners (SSH, MySQL, SMB, RDP, MQTT, RTSP, and more) from observed traffic
 - **315 active probe plugins** -- protocol-specific request/response parsing, not just banner grabs
-- **11.5 million fingerprint signatures** -- synced from 12 upstream databases including IEEE OUI, Huginn-Muninn, Satori, p0f, JA3/JA4
+- **1.2 million fingerprint signatures** -- synced from 19 upstream feeds including IEEE OUI, Huginn-Muninn, Satori, p0f, Rapid7 Recog, JA3/JA4
 - **Real-time web dashboard** -- host inventory with numeric IP sorting, live packet stream, network topology, and attack surface analysis via WebSocket
 - **PCAP import** -- import captured traffic from Wireshark or tcpdump for offline analysis through the full fingerprinting pipeline
 - **Behavioral detection** -- DNS vendor affinity drift, identity shift alerts, MAC spoofing detection, DHCP anomaly analysis
@@ -35,6 +35,8 @@
 - **Custom device properties** -- annotate devices with owner, location, criticality (low/medium/high/critical), free-form tags, and notes. All fields are filterable and searchable.
 - **Presence heartbeat** -- per-device offline-threshold sweeper emits `device_went_offline` / `device_came_online` findings when a host stops or resumes traffic.
 - **Inventory importers** -- extensible subsystem that ingests DHCP lease files (ISC dhcpd and dnsmasq formats) to pre-populate the device inventory; `passively_observed` flag suppresses noise until a live packet arrives. AES-GCM credential store for future importers needing secrets.
+- **Inventory integrations** -- Proxmox VE (nodes, VMs, LXC -- correlates captured MACs to named guests and their hypervisor), Zigbee2MQTT and Z-Wave JS (imports smart-home devices that never touch IP and are therefore invisible to passive capture)
+- **Topology export & sharing** -- server-rendered SVG of the network map, plus optional key-protected read-only share links for handing a map to someone without an account
 - **Auth & notifications** -- token-based API authentication with role-based access control; alert notifications via Apprise (Slack, email, webhooks, and 80+ services)
 
 ## How It Works
@@ -132,6 +134,44 @@ The Docker image exposes port 443 (HTTPS) by default. All three capabilities abo
 
 ```bash
 docker compose up -d
+```
+
+### systemd service
+
+`pipx install -e .` installs into `~/.local/bin`, which is fine for
+interactive use but not for a system service. For an always-on deployment,
+install system-wide and run under the bundled unit:
+
+```bash
+# 1. System-wide install -> /usr/local/bin/leetha
+sudo pipx install --global .
+
+# 2. Unprivileged service account
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin leetha
+
+# 3. Install the unit
+sudo cp leetha.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# 4. Choose the capture interface (state lives in /var/lib/leetha)
+sudo -u leetha LEETHA_DATA_DIR=/var/lib/leetha LEETHA_CACHE_DIR=/var/lib/leetha/cache \
+  leetha interfaces add eth0
+
+# 5. Start
+sudo systemctl enable --now leetha
+```
+
+The unit runs as the unprivileged `leetha` user with only
+`CAP_NET_RAW`, `CAP_NET_ADMIN`, and `CAP_NET_BIND_SERVICE` — the last is
+required for the default port 443, so drop it only if you move the web UI
+above port 1024. State (database, fingerprint cache, TLS CA, and the admin
+token) lives in `/var/lib/leetha` via `StateDirectory=`, so it survives
+restarts and reinstalls.
+
+Retrieve the admin token with:
+
+```bash
+sudo cat /var/lib/leetha/admin-token
 ```
 
 ### Docker customization

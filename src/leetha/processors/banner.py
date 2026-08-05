@@ -127,8 +127,11 @@ class BannerProcessor(Processor):
             },
         )]
 
-        # OT device identity extraction from banner content
-        banner_text = packet.get("banner", "") or ""
+        # OT device identity extraction from banner content.
+        # The passive capture path (capture/protocols/banner.py) sets
+        # "raw_banner"; only the active-probe path uses "banner". Check
+        # both so SEL/GE/Schneider relay banners are actually reached.
+        banner_text = packet.get("raw_banner") or packet.get("banner") or ""
         if banner_text:
             ot_evidence = self._extract_ot_identity(banner_text)
             if ot_evidence:
