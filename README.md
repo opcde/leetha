@@ -104,6 +104,8 @@ Open `https://localhost` to view discovered devices in real-time.
 
 ### From source (pipx — recommended)
 
+Leetha is not on PyPI — install from the repository.
+
 ```bash
 git clone https://github.com/tjnull/leetha.git
 cd leetha
@@ -117,6 +119,19 @@ pipx install -e .
 # Or install with pip
 pip install -e .
 ```
+
+### Without building the frontend
+
+Installing straight from the repository URL works too:
+
+```bash
+pipx install git+https://github.com/tjnull/leetha.git
+```
+
+This skips the frontend build, so the **web dashboard is a placeholder page**
+until you build it — capture, fingerprinting, the CLI, and the REST API are
+all fully functional. To get the real dashboard, clone the repo, run the
+`bun run build` step above, and reinstall with `pipx install --force .`.
 
 ### Docker
 
