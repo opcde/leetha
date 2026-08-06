@@ -36,20 +36,18 @@ leetha = "leetha.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/leetha"]
-# dist/ is delivered by the force-include below. Without this exclude it is
-# also picked up by the normal package walk whenever hatchling cannot read
-# VCS ignore rules -- which is the case inside Docker, since .dockerignore
-# strips .git/ -- and the build dies on a duplicate archive path.
-exclude = ["src/leetha/ui/web/dist"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/leetha/ui/web/dist" = "leetha/ui/web/dist"
+# The compiled dashboard lives inside the package directory and is committed,
+# so the normal package walk already ships it -- force-including it as well
+# adds the same paths twice and the build fails on a duplicate archive entry.
+# Only docs/wiki, which sits outside src/, needs forcing in.
 "docs/wiki" = "leetha/docs/wiki"
 
-# The dist/ directory above is produced by `bun run build` and is git-ignored,
-# so it is absent in a fresh clone. Hatchling hard-fails on a missing
-# force-include, which broke every git-based install. This hook creates a
-# placeholder when no real build is present.
+# Fallback only. The compiled dashboard is committed, so a normal clone
+# already has it; this writes a placeholder if someone builds from a tree
+# where dist/ was deleted or has not been generated yet, so the wheel is
+# still installable.
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 
