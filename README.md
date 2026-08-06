@@ -80,10 +80,8 @@ Capture Engine -----> Parser Chain (20 protocol parsers)
 Requires **Python 3.11+** and packet capture privileges (root, sudo, or `CAP_NET_RAW`).
 
 ```bash
-# Install from source
-git clone https://github.com/tjnull/leetha.git && cd leetha
-cd frontend && bun install && bun run build && cd ..
-pipx install -e .  # or: pip install -e .
+# Install (dashboard included — no build step)
+pipx install git+https://github.com/tjnull/leetha.git
 
 # Sync fingerprint databases (recommended, ~880 MB)
 leetha sync
@@ -104,13 +102,15 @@ Open `https://localhost` to view discovered devices in real-time.
 
 ### From source (pipx — recommended)
 
-Leetha is not on PyPI — install from the repository.
+Leetha is not on PyPI — install from the repository. The compiled dashboard
+ships in the repo, so the frontend build is only needed if you are changing
+the UI.
 
 ```bash
 git clone https://github.com/tjnull/leetha.git
 cd leetha
 
-# Build the frontend (requires bun — https://bun.sh)
+# Only needed when developing the frontend (requires bun — https://bun.sh)
 cd frontend && bun install && bun run build && cd ..
 
 # Install with pipx (isolated environment, editable)
@@ -120,18 +120,17 @@ pipx install -e .
 pip install -e .
 ```
 
-### Without building the frontend
+### One-line install (no build step)
 
-Installing straight from the repository URL works too:
+The compiled dashboard is committed to the repository, so installing straight
+from the URL gives you the full web UI — no bun, no build step:
 
 ```bash
 pipx install git+https://github.com/tjnull/leetha.git
 ```
 
-This skips the frontend build, so the **web dashboard is a placeholder page**
-until you build it — capture, fingerprinting, the CLI, and the REST API are
-all fully functional. To get the real dashboard, clone the repo, run the
-`bun run build` step above, and reinstall with `pipx install --force .`.
+You only need the `bun run build` step above if you are **developing** the
+frontend.
 
 ### Docker
 
