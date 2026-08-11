@@ -161,6 +161,14 @@ alerting posture and touches no device records.
 > attestation -- and applying it to hundreds of unreviewed devices recorded
 > something untrue. Alert noise is handled by the learning window instead.
 
+### Stopping Leetha
+
+From the interactive console, **Ctrl+C** stops whatever is running and returns
+you to the `leetha>` prompt -- so the first press stops the web dashboard, and
+a second exits leetha. `exit` (or Ctrl+D) shuts down the same way.
+
+Run directly (`leetha start web`, `leetha --web`), a single Ctrl+C exits.
+
 ### `dhcp-leases` -- DHCP Lease File Importer
 
 Ingest a DHCP server's lease file to pre-populate the device inventory. Both

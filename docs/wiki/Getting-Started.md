@@ -97,6 +97,23 @@ Navigates to `https://localhost` -- a React single-page application with live de
 
 See [Web Dashboard](Web-Dashboard.md) for a full tour.
 
+#### First launch: "Leetha is starting"
+
+The dashboard is served immediately, but leetha builds its fingerprint indexes
+in the background -- on a first run that takes a minute or two. Until it
+finishes you get a startup screen rather than the dashboard, and the API
+answers `503 {"status": "starting"}`.
+
+Nothing is being missed while you wait: packet capture is already running, and
+the dashboard opens on its own when the indexes are ready. Sign-in stays
+available throughout.
+
+#### Stopping the dashboard
+
+From the interactive console, **Ctrl+C** stops the web server and returns you
+to the `leetha>` prompt; a second **Ctrl+C** exits leetha. Started directly
+(`leetha start web`), one Ctrl+C shuts it down.
+
 ### CLI Live Stream
 
 ```bash
@@ -209,10 +226,53 @@ Leetha uses two filesystem locations:
 | `probe_enabled` | `false` | Whether ServiceProbe plugins run |
 | `probe_max_concurrent` | `10` | Simultaneous probe connections |
 | `probe_cooldown_seconds` | `3600` | Seconds before re-probing a target |
+| `baseline_learning_mode` | `automatic` | `automatic`, `always_learning`, or `manual` |
+| `baseline_quiet_period_minutes` | `30` | Minimum silence before the network counts as learned |
+| `baseline_max_window_days` | `7` | Hard cap on the learning period |
 
 ---
 
-## 8. Running the Test Suite
+## 8. What to Expect on a New Network
+
+Leetha does **not** alert on the devices that were already there when you
+started it. While it is still discovering a network, every `new_host` finding
+is INFO -- so a fresh deployment on 200 hosts does not produce 200 warnings.
+
+Once discovery goes quiet, leetha treats the network as learned, and a device
+appearing *after* that point is a genuine new arrival and grades WARNING.
+That transition happens on its own; there is no command to run.
+
+```bash
+leetha baseline status      # learning state, when it started, last new device
+```
+
+If you know the inventory is complete and would rather not wait, close the
+window yourself with `leetha baseline finish`, or use
+**Settings -> Discovery & Alerting** in the dashboard.
+
+Seeing only INFO findings for the first stretch is therefore expected, not a
+misconfiguration. See [Device Authorization](Device-Authorization.md) for the
+full model.
+
+---
+
+## 9. Running Leetha with sudo
+
+Packet capture needs root, so `sudo leetha` is a normal way to run it. Leetha
+hands ownership of anything it writes back to the invoking user, so later
+unprivileged commands keep working.
+
+If you are upgrading from a version before 1.4.0 you may still have
+root-owned leftovers from an earlier run -- typically seen as a
+`PermissionError` from `leetha auth reset-token`. Fix them once:
+
+```bash
+sudo chown -R "$(id -un):$(id -gn)" ~/.leetha
+```
+
+---
+
+## 10. Running the Test Suite
 
 Leetha's tests live under `spec/`:
 

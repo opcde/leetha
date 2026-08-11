@@ -30,7 +30,7 @@ Detailed walkthrough: [Getting Started](Getting-Started.md)
 - [Active Probing](Active-Probing.md) -- ServiceProbe interface, ServiceConnection, identify() method
 - [PCAP Import](PCAP-Import.md) -- Import captured traffic for offline analysis through the fingerprinting pipeline
 - [Web Dashboard](Web-Dashboard.md) -- React frontend pages, REST API, WebSocket events
-- [Device Authorization](Device-Authorization.md) -- Tri-state authorization (approved/unapproved/rejected), baseline workflow, audit trail
+- [Device Authorization](Device-Authorization.md) -- Automatic learning window, tri-state authorization (approved/unapproved/rejected) as a human attestation, audit trail
 - [Custom Properties](Custom-Properties.md) -- Owner, location, criticality, tags, notes for every device
 - [Presence Monitoring](Presence-Monitoring.md) -- Per-device offline thresholds, `device_went_offline` / `device_came_online` rules
 - [Inventory Sources](Inventory-Sources.md) -- DHCP lease importer, credentials store, importer scheduler

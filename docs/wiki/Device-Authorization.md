@@ -99,6 +99,28 @@ not watching, so it cannot claim what it now sees is new.
 Configure it in **Settings → Discovery & Alerting**, or force it with
 `leetha baseline finish`.
 
+### `discovery_context`
+
+Each device records the sensor's learning state at the moment it was first
+seen, in `devices.discovery_context`:
+
+| Value | Meaning |
+|---|---|
+| `learning` | Found while leetha was still discovering the network |
+| `monitored` | Arrived after the network was learned |
+
+It is stamped once and never overwritten, so severity cannot be re-graded by a
+later sighting or by changing the settings. Devices that predate the upgrade
+backfill to `learning` — everything already known is pre-existing inventory.
+
+Filter on it from the Devices page, or via the API:
+
+```
+GET /api/devices?discovery_context=monitored
+```
+
+which answers "what has appeared since leetha learned this network?".
+
 Sample output of `baseline status`:
 
 ```

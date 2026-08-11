@@ -1,5 +1,9 @@
 # Web Dashboard
 
+> **On first load** the dashboard may show a "Leetha is starting" screen for a
+> minute or two while fingerprint indexes build in the background. Capture is
+> already running; the dashboard opens on its own when it finishes.
+
 Leetha ships a React single-page application (built with shadcn/ui and Tailwind CSS) that provides real-time visibility into discovered devices, security findings, and system configuration. The frontend is pre-compiled -- no Node.js installation is necessary.
 
 ```bash
@@ -28,8 +32,10 @@ Key interactions:
 - **Bulk authorization** — select rows via checkboxes to reveal an Approve / Reject /
   Revoke / Clear toolbar that applies to the selection via
   `POST /api/devices/bulk/authorization`
-- **Discovery context filter** — show only devices that arrived after leetha
-  learned the network, or only those found during the initial learning period.
+- **Discovery context filter** (`?discovery_context=learning|monitored`) — show
+  only devices that arrived after leetha learned the network, or only those
+  found during the initial learning period. See
+  [Device Authorization](Device-Authorization.md#discovery_context).
   Learning-window policy itself lives in Settings → Discovery & Alerting; the
   old "Set baseline" banner has been removed
 - CSV or JSON bulk export (includes owner, location, criticality, tags, notes,
