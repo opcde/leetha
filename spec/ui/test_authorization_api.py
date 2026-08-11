@@ -79,12 +79,20 @@ async def test_approve_unknown_device_returns_404(seeded_app):
 
 
 @pytest.mark.asyncio
-async def test_baseline_set_endpoint(seeded_app):
+async def test_baseline_set_endpoint_is_gone(seeded_app):
+    """Removed, not repurposed: scripts get a 404 rather than silent new behaviour."""
     client, db = seeded_app
     r = client.post("/api/baseline/set", json={})
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_baseline_finish_closes_the_window(seeded_app):
+    client, db = seeded_app
+    assert client.get("/api/baseline/status").json()["learning"] is True
+    r = client.post("/api/baseline/finish", json={})
     assert r.status_code == 200
-    body = r.json()
-    assert body["touched"] == 2
+    assert client.get("/api/baseline/status").json()["learning"] is False
 
 
 @pytest.mark.asyncio

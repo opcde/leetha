@@ -258,11 +258,18 @@ console commands:
         p.add_argument("--reason", help="Optional reason string")
 
     # Baseline subcommand (Phase A.2)
-    baseline_parser = sub.add_parser("baseline", help="Manage authorization baseline")
+    baseline_parser = sub.add_parser(
+        "baseline", help="Inspect and control the discovery learning window")
     baseline_sub = baseline_parser.add_subparsers(dest="baseline_action")
-    baseline_sub.add_parser("set", help="Approve all currently unapproved devices")
+    baseline_sub.add_parser("status", help="Show learning-window state and counts")
+    baseline_sub.add_parser("finish", help="Stop learning now and start alerting")
+    baseline_sub.add_parser("restart", help="Re-enter learning (e.g. new network)")
     baseline_sub.add_parser("reset", help="Return every device to 'unapproved'")
-    baseline_sub.add_parser("status", help="Show authorization counts")
+    baseline_sub.add_parser(
+        "clear-attestations",
+        help="Revert approvals made by the removed bulk 'baseline set'")
+    # Kept only to give scripts a clear error instead of "invalid choice".
+    baseline_sub.add_parser("set", help=argparse.SUPPRESS)
 
     # Phase A.3 — DHCP lease importer CLI
     dhcp_parser = sub.add_parser("dhcp-leases", help="DHCP lease file importer")

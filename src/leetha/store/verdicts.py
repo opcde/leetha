@@ -86,6 +86,7 @@ class VerdictRepository:
         location: str | None = None,
         tag: str | None = None,
         authorization: str | None = None,
+        discovery_context: str | None = None,
         is_online: bool | None = None,
     ) -> tuple[list[dict], int]:
         """Return paginated, filtered device list with total count.
@@ -128,6 +129,7 @@ class VerdictRepository:
                    d.criticality AS d_criticality, d.tags AS d_tags,
                    d.notes AS d_notes,
                    d.authorization AS d_authorization,
+                   d.discovery_context AS d_discovery_context,
                    d.authorized_at AS d_authorized_at,
                    d.authorized_by AS d_authorized_by,
                    d.is_online AS d_is_online,
@@ -199,6 +201,17 @@ class VerdictRepository:
             else:
                 conditions.append("d.authorization = ?")
                 params.append(authorization)
+        if discovery_context:
+            # Rows predating the migration have no value; treat them as
+            # 'learning' so pre-existing inventory is never mistaken for a
+            # post-baseline arrival.
+            if discovery_context == "learning":
+                conditions.append(
+                    "(d.discovery_context IS NULL OR d.discovery_context = 'learning')"
+                )
+            else:
+                conditions.append("d.discovery_context = ?")
+                params.append(discovery_context)
         if is_online is not None:
             # NULL is_online means no devices row ⇒ treated as online=True by
             # the API's _merge_custom_props default.
@@ -240,6 +253,7 @@ class VerdictRepository:
             "owner": "d.owner",
             "location": "d.location",
             "authorization": "d.authorization",
+            "discovery_context": "d.discovery_context",
             "is_online": "COALESCE(d.is_online, 1)",
             "offline_since": "d.offline_since",
             "presence_threshold_seconds": "COALESCE(d.presence_threshold_seconds, 300)",
@@ -293,6 +307,9 @@ class VerdictRepository:
                 "authorization": (row["d_authorization"] if "d_authorization" in row.keys() else None) or "unapproved",
                 "authorized_at": row["d_authorized_at"] if "d_authorized_at" in row.keys() else None,
                 "authorized_by": row["d_authorized_by"] if "d_authorized_by" in row.keys() else None,
+                # Automatic baseline — was leetha still learning when this
+                # device first appeared?
+                "discovery_context": (row["d_discovery_context"] if "d_discovery_context" in row.keys() else None) or "learning",
                 # Phase A.4 presence
                 "is_online": bool(row["d_is_online"]) if ("d_is_online" in row.keys() and row["d_is_online"] is not None) else True,
                 "offline_since": row["d_offline_since"] if "d_offline_since" in row.keys() else None,

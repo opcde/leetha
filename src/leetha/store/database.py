@@ -1082,31 +1082,54 @@ ON CONFLICT(mac) DO UPDATE SET
             await self._conn.commit()
         return len(rows)
 
-    async def baseline_set(self, *, actor: str = "baseline") -> int:
-        """Approve every currently-unapproved device. Returns count touched."""
+    async def clear_baseline_attestations(self, *, actor: str = "baseline-cleanup") -> int:
+        """Revert approvals that came from the old bulk `baseline set`.
+
+        Approval means "a human confirmed this device and confirmed leetha's
+        fingerprint of it is accurate". `baseline set` stamped that onto every
+        device at once and wrote an audit row claiming as much, when nobody had
+        looked. Those rows are identifiable by reason = 'baseline'.
+
+        Devices a human approved individually are left untouched. Reverting is
+        free now that approval no longer drives alert severity.
+        """
         assert self._conn is not None
         now_iso = datetime.now(timezone.utc).isoformat()
         async with self._mu:
             async with self._conn.execute(
-                "SELECT mac FROM devices WHERE authorization = 'unapproved'"
+                "SELECT DISTINCT mac FROM authorization_history "
+                "WHERE reason = 'baseline' AND new_state = 'approved'"
             ) as cur:
-                macs = [row[0] for row in await cur.fetchall()]
-            if not macs:
+                candidates = [row[0] for row in await cur.fetchall()]
+            if not candidates:
                 return 0
-            for mac in macs:
+
+            reverted = []
+            for mac in candidates:
+                # Only revert if the *latest* transition is still the bulk one;
+                # a later hand-approval or rejection is a real human decision.
+                async with self._conn.execute(
+                    "SELECT reason, new_state FROM authorization_history "
+                    "WHERE mac = ? ORDER BY id DESC LIMIT 1", (mac,),
+                ) as cur:
+                    last = await cur.fetchone()
+                if not last or last[0] != "baseline":
+                    continue
                 await self._conn.execute(
-                    "UPDATE devices SET authorization = 'approved', "
-                    "authorized_at = ?, authorized_by = ? WHERE mac = ?",
-                    (now_iso, actor, mac),
+                    "UPDATE devices SET authorization = 'unapproved', "
+                    "authorized_at = NULL, authorized_by = NULL "
+                    "WHERE mac = ? AND authorization = 'approved'", (mac,),
                 )
                 await self._conn.execute(
                     "INSERT INTO authorization_history "
                     "(mac, previous_state, new_state, actor, reason, timestamp) "
-                    "VALUES (?, 'unapproved', 'approved', ?, 'baseline', ?)",
+                    "VALUES (?, 'approved', 'unapproved', ?, "
+                    "'baseline-attestation-cleared', ?)",
                     (mac, actor, now_iso),
                 )
+                reverted.append(mac)
             await self._conn.commit()
-        return len(macs)
+        return len(reverted)
 
     # Phase A.4 — presence heartbeat helpers ------------------------------
 
