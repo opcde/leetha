@@ -294,6 +294,26 @@ class LeethaApp:
 
         self._tasks.append(asyncio.create_task(_unsnooze_loop()))
 
+        # Automatic baseline — advance the learning window and keep a heartbeat
+        # so a long outage can be detected on the next start.
+        from leetha.baseline import evaluate_window, recover_from_outage
+
+        try:
+            await recover_from_outage(self.db, self.config)
+        except Exception as e:
+            logger.debug("Baseline outage check failed: %s", e)
+
+        async def _baseline_loop():
+            while self._running:
+                await asyncio.sleep(60)
+                try:
+                    await evaluate_window(self.db, self.config)
+                    await self.db.record_heartbeat()
+                except Exception as e:
+                    logger.debug("Learning-window check failed: %s", e)
+
+        self._tasks.append(asyncio.create_task(_baseline_loop()))
+
         # If interfaces were provided at construction time, start capture
         # immediately (CLI mode with -i flag).
         if self.config.interfaces:

@@ -57,6 +57,13 @@ class LeethaConfig:
     notification_urls: list[str] = field(default_factory=list)
     notification_min_severity: str = "warning"
 
+    # Automatic baseline — learning-window policy.
+    # The window closes on discovery saturation rather than a timer, so the
+    # same settings serve a one-hour assessment run and a multi-week deployment.
+    baseline_learning_mode: str = "automatic"  # automatic | always_learning | manual
+    baseline_quiet_period_minutes: int = 30
+    baseline_max_window_days: int = 7
+
     @property
     def interface(self) -> str | None:
         """Deprecated: returns first interface name for backward compat."""
@@ -128,6 +135,8 @@ _PERSISTABLE_FIELDS = [
     "bpf_filter", "probe_enabled", "probe_max_concurrent",
     "probe_cooldown_seconds",
     "notification_urls", "notification_min_severity",
+    "baseline_learning_mode", "baseline_quiet_period_minutes",
+    "baseline_max_window_days",
 ]
 
 

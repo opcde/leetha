@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 from leetha.store.models import (
     Alert,
@@ -398,6 +401,11 @@ class Database:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._mu = asyncio.Lock()  # serialises writes
+        # MACs already in the devices table. Loaded lazily on first device
+        # write so "is this a new discovery?" costs a set lookup rather than a
+        # query on the hot path. Rebuilt per process, so a restart does not
+        # re-stamp known devices as new arrivals.
+        self._known_macs: set[str] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -446,6 +454,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_devices_criticality ON devices(criticality)",
             "CREATE INDEX IF NOT EXISTS idx_devices_location ON devices(location)",
             "CREATE INDEX IF NOT EXISTS idx_devices_authorization ON devices(authorization)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_discovery_context ON devices(discovery_context)",
             "CREATE INDEX IF NOT EXISTS idx_auth_hist_mac ON authorization_history(mac)",
             "CREATE INDEX IF NOT EXISTS idx_probe_status ON probe_targets(status)",
             "CREATE INDEX IF NOT EXISTS idx_fp_hist_mac ON fingerprint_history(mac)",
@@ -461,6 +470,11 @@ class Database:
         await self.backfill_identities()
         await self._clean_dirty_hostnames()
         await self._conn.commit()
+
+        # Seed the learning window now rather than on first access, so
+        # first_capture_at means "when this sensor started watching" instead of
+        # "whenever something first asked".
+        await self.get_sensor_state()
 
         # Fix DB file ownership when running under sudo
         from leetha.platform import fix_ownership
@@ -726,24 +740,63 @@ ON CONFLICT(mac) DO UPDATE SET
             dev.discovery_context or "learning",
         )
 
+    async def _note_device_write(self, device: Device) -> bool:
+        """Stamp *device* with the live window state. True if it is a new MAC.
+
+        Called on every device write, so it must stay cheap: membership is
+        tested against an in-memory MAC set loaded once, and only a genuinely
+        new MAC costs anything further. Repeat sightings must not touch
+        last_discovery_at -- saturation measures *new devices*, not traffic
+        volume, or a chatty network would never look quiet and the window would
+        never close.
+
+        The stamp itself is advisory: discovery_context is first-write-wins in
+        SQL, so an existing row keeps whatever it was originally given.
+        """
+        if self._known_macs is None:
+            async with self._conn.execute("SELECT mac FROM devices") as cur:
+                self._known_macs = {r[0] for r in await cur.fetchall()}
+        if device.mac in self._known_macs:
+            return False
+
+        self._known_macs.add(device.mac)
+        if device.discovery_context is None:
+            state = await self.get_sensor_state()
+            device.discovery_context = (
+                "learning" if state["window_closed_at"] is None else "monitored"
+            )
+        return True
+
+    async def _record_discovery_no_commit(self, at: datetime | None = None) -> None:
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._conn.execute(
+            "UPDATE sensor_state SET last_discovery_at = ? WHERE id = 1", (stamp,)
+        )
+
     async def upsert_device(self, device: Device) -> None:
         """Persist a device, merging with any existing row via COALESCE.
 
         Acquires the write-lock and commits immediately.
         """
         assert self._conn is not None
+        is_new = await self._note_device_write(device)
         async with self._mu:
             await self._conn.execute(
                 self._DEVICE_UPSERT_SQL, self._device_bind_params(device),
             )
+            if is_new:
+                await self._record_discovery_no_commit()
             await self._conn.commit()
 
     async def upsert_device_no_commit(self, device: Device) -> None:
         """Persist a device without committing -- caller owns the transaction."""
         assert self._conn is not None
+        is_new = await self._note_device_write(device)
         await self._conn.execute(
             self._DEVICE_UPSERT_SQL, self._device_bind_params(device),
         )
+        if is_new:
+            await self._record_discovery_no_commit()
 
     async def get_device(self, mac: str) -> Device | None:
         """Look up a single device by its MAC address."""
@@ -951,6 +1004,47 @@ ON CONFLICT(mac) DO UPDATE SET
     async def reopen_learning_window(self) -> None:
         """Re-enter learning (discovery burst, or a long sensor outage)."""
         await self._set_sensor_state("window_closed_at", None)
+
+    async def apply_burst_reentry(self, macs: list[str]) -> int:
+        """Re-enter learning and correct the devices caught by a burst.
+
+        Findings fire per device as devices arrive, so the first few of a burst
+        have already emitted WARNINGs before the burst is recognisable. Rather
+        than delay grading pipeline-wide for one edge case, those findings are
+        corrected after the fact: contexts flip back to 'learning' and the
+        emitted new_host rows are downgraded to INFO.
+
+        Rows are only ever updated -- never deleted. The learning window is a
+        severity layer and must not remove evidence already captured.
+        """
+        assert self._conn is not None
+        if not macs:
+            return 0
+        placeholders = ",".join("?" * len(macs))
+        async with self._mu:
+            await self._conn.execute(
+                f"UPDATE devices SET discovery_context = 'learning' "
+                f"WHERE mac IN ({placeholders})",
+                macs,
+            )
+            try:
+                await self._conn.execute(
+                    f"UPDATE findings SET severity = 'info' "
+                    f"WHERE rule = 'new_host' AND severity = 'warning' "
+                    f"AND hw_addr IN ({placeholders})",
+                    macs,
+                )
+            except Exception as exc:
+                # `findings` belongs to the Store layer, not Database, so it is
+                # absent in bare-Database contexts. The context flip above is
+                # the authoritative correction; the severity rewrite is a
+                # cosmetic catch-up for rows already emitted.
+                logger.debug("burst finding downgrade skipped: %s", exc)
+            await self._conn.execute(
+                "UPDATE sensor_state SET window_closed_at = NULL WHERE id = 1"
+            )
+            await self._conn.commit()
+        return len(macs)
 
     async def record_heartbeat(self, *, at: datetime | None = None) -> None:
         """Record that the sensor is alive, for outage detection on restart."""

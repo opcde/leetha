@@ -66,7 +66,11 @@ class Device:
     # Automatic baseline — the sensor's learning state when this device was
     # first discovered. Stamped once and never overwritten, so new_host
     # severity cannot be re-graded by later upserts or window transitions.
-    discovery_context: str = "learning"  # 'learning' | 'monitored'
+    #
+    # None means "the store decides": it stamps the live window state on a
+    # genuinely new MAC. An explicit value is honoured, which is what lets
+    # tests and importers seed a specific context.
+    discovery_context: str | None = None  # 'learning' | 'monitored' | None
 
     def to_dict(self) -> dict:
         import re

@@ -118,7 +118,10 @@ async def test_migration_backfills_existing_devices_to_learning(file_db):
     grade as a new arrival.
     """
     # Simulate a pre-upgrade schema by removing the column, then re-running
-    # migrations the way an upgrade would.
+    # migrations the way an upgrade would. The index goes first: SQLite will
+    # not drop a column an index still references. (A real upgrade never drops
+    # anything -- migrations add the column before the index is created.)
+    await file_db.db.execute("DROP INDEX IF EXISTS idx_devices_discovery_context")
     await file_db.db.execute("ALTER TABLE devices DROP COLUMN discovery_context")
     await file_db.db.execute(
         "INSERT INTO devices (mac, first_seen, last_seen) VALUES (?, ?, ?)",
