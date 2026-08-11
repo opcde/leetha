@@ -20,6 +20,19 @@ def _generate_key() -> ec.EllipticCurvePrivateKey:
     return ec.generate_private_key(ec.SECP256R1())
 
 
+def _restore_ownership(path: Path) -> None:
+    """Hand a freshly-written file back to the invoking user under sudo.
+
+    Capture needs root and the web TLS cert is generated on first start, so
+    `sudo leetha` would otherwise leave ca/web.key and ca/web.crt owned by root
+    inside the user's data directory. Applied here in the writers rather than
+    at each call site, so init_ca, issue_cert, ensure_web_cert -- and anything
+    added later -- are all covered. No-op when not under sudo.
+    """
+    from leetha.platform import fix_ownership
+    fix_ownership(path)
+
+
 def _write_key(key: ec.EllipticCurvePrivateKey, path: Path) -> None:
     path.write_bytes(
         key.private_bytes(
@@ -29,10 +42,12 @@ def _write_key(key: ec.EllipticCurvePrivateKey, path: Path) -> None:
         )
     )
     os.chmod(str(path), 0o600)
+    _restore_ownership(path)
 
 
 def _write_cert(cert: x509.Certificate, path: Path) -> None:
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    _restore_ownership(path)
 
 
 def _load_key(path: Path) -> ec.EllipticCurvePrivateKey:
@@ -51,7 +66,9 @@ def _load_registry(ca_dir: Path) -> list[dict]:
 
 
 def _save_registry(ca_dir: Path, registry: list[dict]) -> None:
-    (ca_dir / "certs.json").write_text(json.dumps(registry, indent=2))
+    path = ca_dir / "certs.json"
+    path.write_text(json.dumps(registry, indent=2))
+    _restore_ownership(path)
 
 
 def init_ca(ca_dir: Path) -> None:
@@ -214,6 +231,8 @@ def ensure_web_cert(ca_dir: Path) -> tuple[Path, Path]:
         return cert_path, key_path
 
     # Auto-initialize CA if not present
+    ca_dir.mkdir(parents=True, exist_ok=True)
+    _restore_ownership(ca_dir)
     if not (ca_dir / "ca.crt").exists():
         init_ca(ca_dir)
 
