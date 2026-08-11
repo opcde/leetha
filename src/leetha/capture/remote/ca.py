@@ -77,6 +77,12 @@ def init_ca(ca_dir: Path) -> None:
     _write_cert(cert, ca_dir / "ca.crt")
     _save_registry(ca_dir, [])
 
+    # `leetha remote ca init` is commonly run under sudo alongside capture.
+    # Without this the CA lands root-owned inside the user's data directory and
+    # every later unprivileged cert operation fails.
+    from leetha.platform import fix_ownership_recursive
+    fix_ownership_recursive(ca_dir)
+
 
 def load_ca(ca_dir: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     if not (ca_dir / "ca.crt").exists():

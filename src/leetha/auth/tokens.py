@@ -10,6 +10,14 @@ _TOKEN_BYTES = 24  # 24 bytes = 48 hex chars
 _TOKEN_FILENAME = "admin-token"
 
 
+class TokenWriteError(RuntimeError):
+    """The admin token could not be written.
+
+    Raised instead of letting a raw ``PermissionError`` traceback escape, so
+    the CLI can tell the user how to fix it.
+    """
+
+
 def _token_dir() -> Path:
     """Directory holding the admin token -- the configured data directory.
 
@@ -42,17 +50,36 @@ def hash_token(raw_token: str) -> str:
 
 
 def save_admin_token(raw_token: str, leetha_dir: Path | None = None) -> Path:
-    """Write the raw admin token into the data directory, mode 0600."""
+    """Write the raw admin token into the data directory, mode 0600.
+
+    Under ``sudo`` the token would otherwise be left owned by root, which
+    permanently breaks every later unprivileged ``leetha auth`` invocation.
+    Capture needs root, so this is the normal way to run leetha -- ownership is
+    handed back to the invoking user, matching what the data dir, cache dir,
+    log and database already do.
+    """
     if leetha_dir is None:
         leetha_dir = _token_dir()
     leetha_dir.mkdir(parents=True, exist_ok=True)
     token_file = leetha_dir / _TOKEN_FILENAME
-    token_file.write_text(raw_token + "\n")
+    try:
+        token_file.write_text(raw_token + "\n")
+    except PermissionError as exc:
+        raise TokenWriteError(
+            f"Cannot write {token_file}: permission denied.\n"
+            "This usually means the file is owned by root from an earlier "
+            "'sudo leetha' run. Fix it with:\n"
+            f"    sudo chown -R $(id -un):$(id -gn) {leetha_dir}"
+        ) from exc
     try:
         leetha_dir.chmod(0o700)
         token_file.chmod(0o600)
     except OSError:
         pass  # Windows: Unix permission bits not supported
+
+    from leetha.platform import fix_ownership
+    fix_ownership(leetha_dir)
+    fix_ownership(token_file)
     return token_file
 
 
