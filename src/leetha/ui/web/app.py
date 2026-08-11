@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import uvicorn
@@ -70,6 +70,45 @@ async def _next_event_or_shutdown(queue, shutdown: asyncio.Event):
         for task in (get_task, stop_task):
             if not task.done():
                 task.cancel()
+
+
+def request_immediate_shutdown(server) -> None:
+    """Stop the server now, skipping the graceful drain.
+
+    Setting force_exit alone is not enough. uvicorn skips its two "waiting
+    for..." loops, but then still awaits ``asyncio.Server.wait_closed()``,
+    which blocks until every client socket closes -- a browser holding
+    keep-alive connections open never does, so shutdown burned the whole
+    graceful-shutdown timeout regardless. The timeout is read from config at
+    that moment, so shrinking it here makes the wait expire at once.
+    """
+    server.should_exit = True
+    server.force_exit = True
+    try:
+        server.config.timeout_graceful_shutdown = 0
+    except Exception:  # pragma: no cover - config is always present in practice
+        pass
+
+
+def _release_uvicorn_signals(server) -> None:
+    """Stop uvicorn taking over SIGINT, so the console's handler survives.
+
+    uvicorn <=0.28 called ``install_signal_handlers()``, and overriding that
+    attribute was enough. Modern uvicorn (this project ships 0.52) instead
+    wraps serve() in a ``capture_signals()`` context manager, so the old
+    override silently did nothing: uvicorn replaced the console's two-stage
+    Ctrl+C handler with its own, and the console's force-quit path -- the
+    thing that makes the first Ctrl+C exit at once -- became unreachable.
+    Neutralise whichever mechanism this version uses.
+    """
+    @contextmanager
+    def _noop():
+        yield
+
+    if hasattr(server, "capture_signals"):
+        server.capture_signals = _noop
+    # Harmless on versions that no longer call it.
+    server.install_signal_handlers = lambda: None
 
 
 async def _watch_server_exit(server, shutdown: asyncio.Event,
@@ -3857,9 +3896,7 @@ async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", p
     # Fresh run: clear any shutdown flag left by a previous `web` invocation
     # from the console, otherwise streaming endpoints exit immediately.
     _web_shutdown.clear()
-    # Disable uvicorn's own signal handlers — the console manages SIGINT
-    # and sets server.should_exit / force_exit directly.
-    server.install_signal_handlers = lambda: None
+    _release_uvicorn_signals(server)
     global _last_server
     _last_server = server
     # Watch for shutdown *while* serving: the finally block below runs only

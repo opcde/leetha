@@ -133,3 +133,50 @@ async def test_streaming_endpoint_unblocks_once_the_watcher_fires():
     )
     assert event is None
     watcher.cancel()
+
+
+def test_uvicorn_does_not_steal_the_consoles_sigint_handler():
+    """The console installs a two-stage Ctrl+C handler; uvicorn must not clobber it.
+
+    uvicorn <=0.28 used install_signal_handlers(); 0.52 uses a capture_signals()
+    context manager. Overriding only the former silently did nothing, so uvicorn
+    replaced the console's handler and its force-quit path was unreachable --
+    the first Ctrl+C then could not exit immediately.
+    """
+    import signal
+
+    import uvicorn
+
+    from leetha.ui.web.app import _release_uvicorn_signals
+
+    server = uvicorn.Server(uvicorn.Config(lambda *a, **kw: None, port=9998))
+    _release_uvicorn_signals(server)
+
+    sentinel = signal.getsignal(signal.SIGINT)
+    with server.capture_signals():
+        assert signal.getsignal(signal.SIGINT) is sentinel
+    assert signal.getsignal(signal.SIGINT) is sentinel
+
+
+def test_request_immediate_shutdown_collapses_the_drain():
+    """force_exit alone still waits: uvicorn awaits Server.wait_closed().
+
+    A browser holding keep-alive connections never closes them, so shutdown
+    burned the full graceful-shutdown timeout even with force_exit set. The
+    timeout is read from config at that moment, so it has to be shrunk too.
+    """
+    import uvicorn
+
+    from leetha.ui.web.app import WEB_SHUTDOWN_TIMEOUT, request_immediate_shutdown
+
+    server = uvicorn.Server(uvicorn.Config(
+        lambda *a, **kw: None, port=9997,
+        timeout_graceful_shutdown=WEB_SHUTDOWN_TIMEOUT,
+    ))
+    assert server.config.timeout_graceful_shutdown == WEB_SHUTDOWN_TIMEOUT
+
+    request_immediate_shutdown(server)
+
+    assert server.should_exit is True
+    assert server.force_exit is True
+    assert server.config.timeout_graceful_shutdown == 0

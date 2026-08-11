@@ -1120,8 +1120,8 @@ class LeethaConsole:
             if _web_server_ref is None:
                 _web_server_ref = _get_last_server()
             if _web_server_ref is not None:
-                _web_server_ref.should_exit = True
-                _web_server_ref.force_exit = True
+                from leetha.ui.web.app import request_immediate_shutdown
+                request_immediate_shutdown(_web_server_ref)
             else:
                 # No server to ask nicely. Ctrl+C must still mean something on
                 # the first press, so leave rather than sit there doing nothing.
