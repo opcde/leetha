@@ -28,8 +28,10 @@ Key interactions:
 - **Bulk authorization** — select rows via checkboxes to reveal an Approve / Reject /
   Revoke / Clear toolbar that applies to the selection via
   `POST /api/devices/bulk/authorization`
-- **"Set baseline" banner** appears at the top when `approved < 5` and no baseline
-  has been set — one click bulk-approves every discovered device
+- **Discovery context filter** — show only devices that arrived after leetha
+  learned the network, or only those found during the initial learning period.
+  Learning-window policy itself lives in Settings → Discovery & Alerting; the
+  old "Set baseline" banner has been removed
 - CSV or JSON bulk export (includes owner, location, criticality, tags, notes,
   authorization, `is_online`, `offline_since`, `presence_threshold_seconds`)
 - Toggle between identity-grouped view (merges randomized MACs) and raw MAC view
@@ -145,9 +147,11 @@ All alert types flow into findings: new devices, OS changes, MAC randomization, 
 | POST | `/api/devices/{mac}/reject` | admin | Reject device, record audit row |
 | POST | `/api/devices/{mac}/revoke` | admin | Return device to unapproved state |
 | POST | `/api/devices/bulk/authorization` | admin | Apply `approve`/`reject`/`revoke` to up to 500 MACs at once |
-| POST | `/api/baseline/set` | admin | Approve every currently-unapproved device |
+| POST | `/api/baseline/finish` | admin | Close the learning window; start alerting on new arrivals |
+| POST | `/api/baseline/restart-learning` | admin | Re-enter learning |
+| POST | `/api/baseline/clear-attestations` | admin | Undo approvals made by the removed bulk command |
 | POST | `/api/baseline/reset` | admin | Return every non-unapproved device back to unapproved |
-| GET | `/api/baseline/status` | analyst | `{approved, unapproved, rejected, last_baseline_at}` counts |
+| GET | `/api/baseline/status` | analyst | Learning-window state plus authorization counts |
 | GET | `/api/devices/{mac}/authorization/history` | analyst | Per-device audit trail (newest first) with `limit` query param |
 
 Body schema for approve/reject/revoke (all optional): `{"reason": "..."}` — recorded in the audit row.

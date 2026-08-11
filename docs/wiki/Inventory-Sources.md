@@ -295,6 +295,6 @@ The scheduler will pick up any enabled `importer_config` row whose `name` matche
 
 ## Role Enforcement
 
-`POST /api/inventory/*` is **admin-only**. Imports can flood the device inventory, which affects `new_host` alerting posture when combined with `baseline set` — delegating to analyst tokens would be a privilege-escalation risk.
+`POST /api/inventory/*` is **admin-only**. Imports can flood the device inventory, which affects `new_host` alerting posture and the learning window — delegating to analyst tokens would be a privilege-escalation risk.
 
 Analysts can still *see* imported devices via the normal `GET /api/devices` endpoint.

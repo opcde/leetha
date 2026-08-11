@@ -31,7 +31,8 @@
 - **PCAP import** -- import captured traffic from Wireshark or tcpdump for offline analysis through the full fingerprinting pipeline
 - **Behavioral detection** -- DNS vendor affinity drift, identity shift alerts, MAC spoofing detection, DHCP anomaly analysis
 - **OT / ICS / SCADA support** -- passive identification of Modbus, BACnet, EtherNet/IP, CoAP, MQTT, and industrial device fingerprinting
-- **Tri-state device authorization** -- every host is approved, unapproved, or rejected; `new_host` severity grades accordingly (approved → INFO, unapproved → WARNING, rejected → CRITICAL). Bulk "set baseline" silences an established network in one click.
+- **Automatic baseline** -- leetha stays quiet while it is still learning a network and escalates only devices that arrive afterwards, so a fresh deployment does not alert on hosts that were already there. The learning window closes on discovery saturation rather than a timer, which suits both a one-hour assessment and a multi-week sensor.
+- **Tri-state device authorization** -- approved / unapproved / rejected records whether a human has confirmed a device *and* confirmed leetha's fingerprint of it. It is never set automatically; `rejected` escalates that device's findings to CRITICAL.
 - **Custom device properties** -- annotate devices with owner, location, criticality (low/medium/high/critical), free-form tags, and notes. All fields are filterable and searchable.
 - **Presence heartbeat** -- per-device offline-threshold sweeper emits `device_went_offline` / `device_came_online` findings when a host stops or resumes traffic.
 - **Inventory importers** -- extensible subsystem that ingests DHCP lease files (ISC dhcpd and dnsmasq formats) to pre-populate the device inventory; `passively_observed` flag suppresses noise until a live packet arrives. AES-GCM credential store for future importers needing secrets.
