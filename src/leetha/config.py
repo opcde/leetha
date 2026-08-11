@@ -141,11 +141,20 @@ _PERSISTABLE_FIELDS = [
 
 
 def save_config(config: LeethaConfig) -> None:
-    """Persist user-configurable settings to settings.json in data_dir."""
+    """Persist user-configurable settings to settings.json in data_dir.
+
+    Ownership is restored because this runs at runtime, not startup: saving a
+    setting from the dashboard during a ``sudo leetha`` session would otherwise
+    leave settings.json root-owned, and every later unprivileged run would fail
+    to save. LeethaApp's recursive fix only covers files present at startup.
+    """
     import json
     data = {k: getattr(config, k) for k in _PERSISTABLE_FIELDS}
     settings_path = config.data_dir / _SETTINGS_FILE
     settings_path.write_text(json.dumps(data, indent=2))
+
+    from leetha.platform import fix_ownership
+    fix_ownership(settings_path)
 
 
 def load_config(

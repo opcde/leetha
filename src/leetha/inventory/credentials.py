@@ -47,6 +47,10 @@ def _load_or_create_key(data_dir: Path) -> bytes:
         key_path.chmod(0o600)
     except PermissionError:
         pass
+    # Created during whichever session first stores a credential -- often a
+    # sudo one. Root-owned, the operator loses access to their own secrets.
+    from leetha.platform import fix_ownership
+    fix_ownership(key_path)
     return key
 
 
@@ -54,6 +58,8 @@ def _connect(data_dir: Path) -> sqlite3.Connection:
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / _DB_FILENAME
     conn = sqlite3.connect(str(db_path))
+    from leetha.platform import fix_ownership
+    fix_ownership(db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, blob BLOB NOT NULL)"
     )

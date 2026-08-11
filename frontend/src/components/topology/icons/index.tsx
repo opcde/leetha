@@ -386,7 +386,6 @@ export const DEVICE_ICON_MAP: Record<string, React.ComponentType<IconProps>> = {
   gateway: IconRouter,
   switch: IconSwitch,
   access_point: IconAccessPoint,
-  mesh_router: IconAccessPoint,
   firewall: IconFirewall,
   load_balancer: IconServer,
   // Compute

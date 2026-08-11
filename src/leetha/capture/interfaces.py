@@ -414,6 +414,12 @@ def persist_adapter_selection(
         Path(scratch).unlink(missing_ok=True)
         raise
 
+    # Selecting interfaces requires root, so this is normally written during a
+    # sudo session. Left root-owned, the operator could not change their
+    # selection again without sudo.
+    from leetha.platform import fix_ownership
+    fix_ownership(dest)
+
 
 def load_saved_adapters(data_dir: Path) -> list[AdapterConfig]:
     """Read previously saved adapter configs.  Returns ``[]`` on any error."""

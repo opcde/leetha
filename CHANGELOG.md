@@ -84,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client connections attached: 3.14s → 0.13s.
 - **`Device.from_row()` ignored `discovery_context`**, so any device loaded
   through that marshaller reported `learning` regardless of what was stored.
+- **More root-owned leftovers from sudo sessions.** `settings.json` (found
+  root-owned on a live install), the saved interface selection, and the
+  credential key/store are now handed back to the invoking user too. The
+  recursive fix at startup only covered files that already existed, so
+  anything written later in a root session stayed root-owned until the next
+  start.
+- **Duplicate `mesh_router` key** in the topology icon map silently discarded
+  one of the two definitions.
 - **Evidence fusion no longer lets stale fingerprint DBs overrule strong
   sources.** Fusion summed every source's score, so correlated databases
   (Satori + Huginn lineage) and duplicate evidence could outvote the
