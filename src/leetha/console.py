@@ -1115,20 +1115,40 @@ class LeethaConsole:
                 except Exception:
                     pass
                 os._exit(0)
+            # Re-read rather than trusting the capture below: the server may
+            # have been constructed after the poll gave up.
+            if _web_server_ref is None:
+                _web_server_ref = _get_last_server()
             if _web_server_ref is not None:
                 _web_server_ref.should_exit = True
                 _web_server_ref.force_exit = True
+            else:
+                # No server to ask nicely. Ctrl+C must still mean something on
+                # the first press, so leave rather than sit there doing nothing.
+                try:
+                    os.write(1, b"\n\033[33m[*] Web server still starting - exiting\033[0m\n")
+                except Exception:
+                    pass
+                os._exit(0)
 
         old_handler = signal.getsignal(signal.SIGINT)
         try:
             from leetha.ui.web.app import _get_last_server
             signal.signal(signal.SIGINT, _web_sigint)
-            # run_web_async stores the server ref; we grab it after launch
+            # run_web_async stores the server ref once uvicorn.Server exists.
+            # That happens after TLS cert generation and app setup, which can
+            # take well over a second — a fixed sleep raced it and left the ref
+            # None forever, so the first Ctrl+C had nothing to signal. Poll
+            # until it appears instead.
             task = asyncio.ensure_future(
                 run_web_async(host=host, port=port, app=self.app, tls=use_tls))
-            # Give server a moment to start so we can grab the ref
-            await asyncio.sleep(0.5)
-            _web_server_ref = _get_last_server()
+            for _ in range(200):  # up to ~20s
+                if task.done():
+                    break
+                _web_server_ref = _get_last_server()
+                if _web_server_ref is not None:
+                    break
+                await asyncio.sleep(0.1)
             await task
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
