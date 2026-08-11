@@ -66,7 +66,9 @@ export function DiscoveryAlertingSection({
   updateField,
 }: {
   values: Record<string, unknown>;
-  updateField: (key: string, value: unknown) => void;
+  // Matches Settings.tsx's updateField exactly; widening it to `unknown`
+  // makes the two signatures incompatible.
+  updateField: (key: string, value: string | number | boolean) => void;
 }) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
