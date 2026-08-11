@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -88,7 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
-      - run: cd frontend && bun install --frozen-lockfile && bun run build
+      - run: cd frontend && bun install --frozen-lockfile
+      - run: cd frontend && bun run test
+      - run: cd frontend && bun run build
       - uses: actions/upload-artifact@v6
         with:
           name: frontend-dist
@@ -107,6 +109,10 @@ jobs:
         with:
           name: frontend-dist
           path: src/leetha/ui/web/dist/
+      - name: Read project version
+        id: ver
+        run: |
+          python -c "import tomllib,pathlib;print('version='+tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])" >> "$GITHUB_OUTPUT"
       - name: Install fpm
         run: |
           sudo apt-get update && sudo apt-get install -y ruby ruby-dev
@@ -117,7 +123,7 @@ jobs:
           /tmp/leetha-venv/bin/pip install .
           fpm -s dir -t deb \
             --name leetha \
-            --version 1.0.0 \
+            --version ${{ steps.ver.outputs.version }} \
             --architecture amd64 \
             --depends python3 \
             --depends libpcap0.8 \
@@ -145,6 +151,10 @@ jobs:
         with:
           name: frontend-dist
           path: src/leetha/ui/web/dist/
+      - name: Read project version
+        id: ver
+        run: |
+          python -c "import tomllib,pathlib;print('version='+tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])" >> "$GITHUB_OUTPUT"
       - name: Install fpm
         run: |
           sudo apt-get update && sudo apt-get install -y ruby ruby-dev rpm
@@ -155,7 +165,7 @@ jobs:
           /tmp/leetha-venv/bin/pip install .
           fpm -s dir -t rpm \
             --name leetha \
-            --version 1.0.0 \
+            --version ${{ steps.ver.outputs.version }} \
             --architecture x86_64 \
             --depends python3 \
             --depends libpcap \

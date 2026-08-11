@@ -98,6 +98,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start.
 - **Duplicate `mesh_router` key** in the topology icon map silently discarded
   one of the two definitions.
+- **CI now runs on `dev`, not just `main`**, so work is verified before it
+  reaches the release branch.
+- **Packaged deb/rpm builds no longer hardcode version 1.0.0.** CI read a
+  literal instead of the project version, so a 1.4.0 build produced packages
+  labelled 1.0.0. The version now comes from `pyproject.toml`.
+- **Frontend tests now run in CI.** Only the build ran, so the suite was never
+  verified there.
 - **Evidence fusion no longer lets stale fingerprint DBs overrule strong
   sources.** Fusion summed every source's score, so correlated databases
   (Satori + Huginn lineage) and duplicate evidence could outvote the
