@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-11 — Automatic Baseline
+
 ### Changed
 - **Automatic baseline replaces `baseline set`.** Alert noise on a freshly
   deployed sensor is now handled by a learning window instead of by
@@ -31,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BaselineBanner`** on the Devices page. Its copy was also wrong: it warned
   that unapproved devices "will fire `new_host` findings at WARNING severity"
   while the pre-baseline guard was holding every one of them at INFO.
+- **Dropped the `huginn_mac_vendors` feed.** Its upstream export was
+  99.7% `Unknown MAC Vendor (xxxxxx)` placeholder rows and added only 5
+  real vendors over the IEEE OUI Master Database, at a 700 MB+ download /
+  multi-GB resident cost — and it fabricated bogus "Unknown MAC Vendor"
+  matches for unassigned OUIs. MAC-to-vendor resolution now relies solely
+  on the authoritative IEEE OUI registry. Removed from the registry, sync
+  pipeline, lookup path, web UI source list, and docs.
 
 ### Added
 - **Settings → Discovery & Alerting.** Learning mode
@@ -41,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sensor_state` table** tracking when the sensor began watching, the last
   new-device discovery, window state, and a heartbeat used to re-enter learning
   after a long outage.
+- **`bun run typecheck`** for the frontend. Vite transpiles without
+  typechecking and nothing else ran `tsc`, so type errors shipped silently.
+- **Import smoke test** over every shipped module. A syntax error in
+  `console.py` once passed the entire suite, because the interactive console is
+  REPL- and signal-driven and no test imported it.
 - **Rapid7 Recog fingerprint sync source.** A curated set of Recog XML
   fingerprints (SSH, HTTP Server, FTP, SMTP, POP/IMAP, SNMP sysDescr, SMB
   native OS, NTP, SIP, MySQL) is now synced and consulted in the banner /
@@ -54,6 +68,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   visible (typical access port) so an empty result isn't read as "all clear".
 
 ### Fixed
+- **`sudo leetha` no longer leaves root-owned files in your data directory.**
+  Capture needs root, so `sudo leetha` is a normal way to run it — but the
+  admin token, CA and web TLS material were written as root inside
+  `~/.leetha`, and every later unprivileged `leetha auth` command then died
+  with a `PermissionError` traceback. Ownership is now handed back for all of
+  them, and a token write that still fails reports the `chown` needed to
+  recover instead of a stack trace.
+- **Ctrl+C now stops the web dashboard immediately.** Two causes: the override
+  meant to stop uvicorn capturing SIGINT targeted a method modern uvicorn no
+  longer has, so uvicorn silently replaced the console's force-quit handler;
+  and even with `force_exit` set, uvicorn still awaited
+  `Server.wait_closed()`, which blocks until every client socket closes — a
+  browser holding keep-alive connections never closes them. Measured with five
+  client connections attached: 3.14s → 0.13s.
+- **`Device.from_row()` ignored `discovery_context`**, so any device loaded
+  through that marshaller reported `learning` regardless of what was stored.
 - **Evidence fusion no longer lets stale fingerprint DBs overrule strong
   sources.** Fusion summed every source's score, so correlated databases
   (Satori + Huginn lineage) and duplicate evidence could outvote the
@@ -86,14 +116,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately tears down) a throwaway app + sensor listener before the
   sudo re-exec.
 
-### Removed
-- **Dropped the `huginn_mac_vendors` feed.** Its upstream export was
-  99.7% `Unknown MAC Vendor (xxxxxx)` placeholder rows and added only 5
-  real vendors over the IEEE OUI Master Database, at a 700 MB+ download /
-  multi-GB resident cost — and it fabricated bogus "Unknown MAC Vendor"
-  matches for unassigned OUIs. MAC-to-vendor resolution now relies solely
-  on the authoritative IEEE OUI registry. Removed from the registry, sync
-  pipeline, lookup path, web UI source list, and docs.
 
 ## [1.3.0] - 2026-05-23 — Fingerprint Coverage, Parallel Sync & Performance
 
