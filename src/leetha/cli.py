@@ -258,11 +258,18 @@ console commands:
         p.add_argument("--reason", help="Optional reason string")
 
     # Baseline subcommand (Phase A.2)
-    baseline_parser = sub.add_parser("baseline", help="Manage authorization baseline")
+    baseline_parser = sub.add_parser(
+        "baseline", help="Inspect and control the discovery learning window")
     baseline_sub = baseline_parser.add_subparsers(dest="baseline_action")
-    baseline_sub.add_parser("set", help="Approve all currently unapproved devices")
+    baseline_sub.add_parser("status", help="Show learning-window state and counts")
+    baseline_sub.add_parser("finish", help="Stop learning now and start alerting")
+    baseline_sub.add_parser("restart", help="Re-enter learning (e.g. new network)")
     baseline_sub.add_parser("reset", help="Return every device to 'unapproved'")
-    baseline_sub.add_parser("status", help="Show authorization counts")
+    baseline_sub.add_parser(
+        "clear-attestations",
+        help="Revert approvals made by the removed bulk 'baseline set'")
+    # Kept only to give scripts a clear error instead of "invalid choice".
+    baseline_sub.add_parser("set", help=argparse.SUPPRESS)
 
     # Phase A.3 — DHCP lease importer CLI
     dhcp_parser = sub.add_parser("dhcp-leases", help="DHCP lease file importer")
@@ -474,6 +481,68 @@ def main():
                 status = "[SELECTED]" if iface.name in saved_names else ""
                 ips = ", ".join(b.address for b in iface.bindings)
                 print(f"  {iface.name:15s} {iface.state:5s} {iface.type:10s} {ips:30s} {status}")
+            return
+
+        if action == "add":
+            from leetha.capture.interfaces import AdapterConfig
+            # spec is name[:type[:label]]
+            parts = args.spec.split(":")
+            name = parts[0].strip()
+            if not name:
+                print(f"Invalid interface spec: {args.spec}")
+                sys.exit(1)
+            detected = {i.name for i in detect_interfaces(include_down=True)}
+            if name not in detected:
+                print(f"Interface {name} not found. Run 'leetha interfaces list'.")
+                sys.exit(1)
+
+            saved = load_interface_config(config.data_dir)
+            if any(s.name == name for s in saved):
+                print(f"Interface {name} is already saved.")
+                return
+
+            saved.append(AdapterConfig(
+                name=name,
+                type=parts[1].strip() if len(parts) > 1 and parts[1].strip() else "local",
+                label=parts[2].strip() if len(parts) > 2 and parts[2].strip() else None,
+            ))
+            save_interface_config(config.data_dir, saved)
+            print(f"Added {name} to saved capture interfaces.")
+            return
+
+        if action == "remove":
+            saved = load_interface_config(config.data_dir)
+            remaining = [s for s in saved if s.name != args.name]
+            if len(remaining) == len(saved):
+                print(f"Interface {args.name} is not in the saved config.")
+                sys.exit(1)
+            save_interface_config(config.data_dir, remaining)
+            print(f"Removed {args.name} from saved capture interfaces.")
+            return
+
+        if action == "show":
+            detected = detect_interfaces(include_down=True)
+            routes = get_routes()
+            enrich_interfaces(detected, routes)
+            match = next((i for i in detected if i.name == args.name), None)
+            if match is None:
+                print(f"Interface {args.name} not found.")
+                sys.exit(1)
+            saved = {s.name: s for s in load_interface_config(config.data_dir)}
+            entry = saved.get(args.name)
+            print(f"  name    : {match.name}")
+            print(f"  state   : {match.state}")
+            print(f"  type    : {match.type}")
+            print(f"  mac     : {getattr(match, 'mac', None) or '-'}")
+            for b in match.bindings:
+                print(f"  address : {b.address}")
+            print(f"  saved   : {'yes' if entry else 'no'}")
+            if entry:
+                print(f"  role    : {entry.type}")
+                print(f"  label   : {entry.label or '-'}")
+                print(f"  filter  : {entry.bpf_filter or '(auto)'}")
+            return
+
         return
 
     if args.command == "sync":

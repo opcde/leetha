@@ -114,7 +114,11 @@ class VerdictEngine:
         category = self._fuse_field(evidence, "category", demote=cat_demote)
         platform = self._fuse_field(evidence, "platform")
         platform_version = self._fuse_field(evidence, "platform_version")
-        model = self._fuse_field(evidence, "model")
+        # The OUI "model" is a vendor-level placeholder ("HPE Server"), not
+        # a real model, so it must yield the same way its category does when
+        # the vendor ships many device classes -- otherwise it masks an
+        # actual model like "HP LaserJet 400 M401n" read off the wire.
+        model = self._fuse_field(evidence, "model", demote=cat_demote)
         hostname = self._fuse_field(evidence, "hostname")
 
         # Overall certainty: weighted average of best evidence per field

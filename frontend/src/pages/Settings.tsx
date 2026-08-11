@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { DiscoveryAlertingSection } from "@/components/settings/DiscoveryAlertingSection";
 import { useTheme, ACCENT_PRESETS } from "@/providers/theme-provider";
 import {
   Save,
@@ -65,6 +66,7 @@ import {
   Folder,
   FileText,
   ChevronUp,
+  Radar,
 } from "lucide-react";
 import {
   Select,
@@ -88,6 +90,7 @@ function formatBytes(bytes: number): string {
 const TABS = [
   { id: "general", label: "General", icon: Settings2 },
   { id: "capture", label: "Capture & Probing", icon: Crosshair },
+  { id: "discovery", label: "Discovery & Alerting", icon: Radar },
   { id: "database", label: "Database", icon: Database },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "appearance", label: "Appearance", icon: Palette },
@@ -367,6 +370,10 @@ export default function Settings() {
               </div>
             </div>
           </div>
+        )}
+
+        {activeTab === "discovery" && (
+          <DiscoveryAlertingSection values={merged} updateField={updateField} />
         )}
 
         {activeTab === "notifications" && <NotificationsTab />}

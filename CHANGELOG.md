@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Automatic baseline replaces `baseline set`.** Alert noise on a freshly
+  deployed sensor is now handled by a learning window instead of by
+  bulk-approving devices. Leetha grades `new_host` on whether it was still
+  learning the network when a device first appeared, and the window closes
+  when device discovery goes quiet rather than after a fixed duration -- so it
+  fits an eight-hour assessment run and a multi-week deployment equally.
+  Existing databases backfill every known device to `learning`, so upgrading
+  requires no action.
+- **`authorization` is now a human attestation only.** Approving a device means
+  "I know this device and leetha's fingerprint of it is accurate". No automatic
+  process writes it, and it no longer affects `new_host` severity -- except
+  `rejected`, which still escalates to CRITICAL.
+
+### Removed
+- **BREAKING: `leetha baseline set` and `POST /api/baseline/set`.** They
+  bulk-approved every device, recording that a human had verified each one when
+  nobody had reviewed them. The CLI keeps a stub that exits non-zero pointing at
+  `leetha baseline finish`; the endpoint returns 404. Use
+  `leetha baseline clear-attestations` (or Settings → Discovery & Alerting) to
+  undo approvals the old command made.
+- **`BaselineBanner`** on the Devices page. Its copy was also wrong: it warned
+  that unapproved devices "will fire `new_host` findings at WARNING severity"
+  while the pre-baseline guard was holding every one of them at INFO.
+
 ### Added
+- **Settings → Discovery & Alerting.** Learning mode
+  (automatic / always learning / manual), quiet period, maximum learning
+  window, a live status line, and the `Finish learning now` action.
+- **`discovery_context` device filter.** Show only devices that arrived after
+  leetha learned the network.
+- **`sensor_state` table** tracking when the sensor began watching, the last
+  new-device discovery, window state, and a heartbeat used to re-enter learning
+  after a long outage.
 - **Rapid7 Recog fingerprint sync source.** A curated set of Recog XML
   fingerprints (SSH, HTTP Server, FTP, SMTP, POP/IMAP, SNMP sysDescr, SMB
   native OS, NTP, SIP, MySQL) is now synced and consulted in the banner /

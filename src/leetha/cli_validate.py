@@ -36,6 +36,15 @@ async def handle_validation(parsed_args):
     storage = Database(cfg.db_path)
     await storage.initialize()
 
+    # The validator reads hosts/verdicts, which are owned by Store -- not by
+    # Database's own schema. On a database that has never seen a capture run
+    # those tables don't exist yet, and every check dies with a raw
+    # "no such table: hosts" traceback.
+    from leetha.store.store import Store
+    _schema = Store(cfg.db_path)
+    await _schema.initialize()
+    await _schema.close()
+
     try:
         target_check = parsed_args.check
         detailed = parsed_args.verbose

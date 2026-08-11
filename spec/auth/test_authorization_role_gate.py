@@ -8,8 +8,12 @@ delegating it to analyst tokens is a real privilege-escalation bug.
 from leetha.auth.roles import requires_admin
 
 
-def test_baseline_set_is_admin_only():
-    assert requires_admin("POST", "/api/baseline/set") is True
+def test_baseline_finish_is_admin_only():
+    assert requires_admin("POST", "/api/baseline/finish") is True
+
+
+def test_clear_attestations_is_admin_only():
+    assert requires_admin("POST", "/api/baseline/clear-attestations") is True
 
 
 def test_baseline_reset_is_admin_only():

@@ -16,18 +16,26 @@ _AUTHORIZATION_SUFFIXES = ("/approve", "/reject", "/revoke")
 
 ADMIN_ONLY_METHODS: dict[str, tuple[str, ...]] = {
     "PUT": ("/api/settings",),
-    "DELETE": ("/api/alerts", "/api/trust", "/api/suppressions", "/api/patterns"),
+    "DELETE": ("/api/alerts", "/api/trust", "/api/suppressions", "/api/patterns",
+               # Revoking a share link is a security decision.
+               "/api/topology/share"),
     "POST": (
         "/api/settings/apply",
         "/api/settings/reset",
-        # Phase A — baseline operations flip every device; admin-only.
-        "/api/baseline/set",
+        # Baseline operations change alerting posture for the whole fleet or
+        # rewrite authorization state; admin-only.
         "/api/baseline/reset",
+        "/api/baseline/finish",
+        "/api/baseline/restart-learning",
+        "/api/baseline/clear-attestations",
         # Phase A — bulk authorization (can approve/reject the whole fleet).
         "/api/devices/bulk/authorization",
         # Phase A — inventory imports populate devices and can flood the
         # discovery pipeline; treat as a privileged operation.
         "/api/inventory/",
+        # Minting a read-only share link exposes the topology to anyone
+        # holding the URL; admin-only.
+        "/api/topology/share",
     ),
 }
 

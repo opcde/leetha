@@ -1,4 +1,4 @@
-"""Phase A.2 — store-level approve/reject/revoke/baseline_set with audit trail."""
+"""Phase A.2 — store-level approve/reject/revoke with audit trail."""
 
 import pytest
 from datetime import datetime, timezone
@@ -85,23 +85,27 @@ async def test_same_state_transition_is_noop_no_history(db):
 
 
 @pytest.mark.asyncio
-async def test_baseline_set_only_touches_unapproved(db):
-    """baseline_set approves unapproved devices, leaves rejected alone."""
-    await db.upsert_device(_make("aa:bb:cc:dd:ee:10"))  # unapproved
-    await db.upsert_device(_make("aa:bb:cc:dd:ee:11"))  # unapproved
-    await db.upsert_device(_make("aa:bb:cc:dd:ee:12"))
-    await db.reject_device("aa:bb:cc:dd:ee:12", actor="alice")
+async def test_clear_attestations_reverts_only_bulk_approvals(db):
+    """Hand-approvals are real human decisions and must survive cleanup."""
+    await db.upsert_device(_make("aa:bb:cc:dd:ee:10"))
+    await db.upsert_device(_make("aa:bb:cc:dd:ee:11"))
+    # Simulate a legacy bulk `baseline set` on :10 only.
+    await db.db.execute(
+        "UPDATE devices SET authorization = 'approved' WHERE mac = ?",
+        ("aa:bb:cc:dd:ee:10",))
+    await db.db.execute(
+        "INSERT INTO authorization_history "
+        "(mac, previous_state, new_state, actor, reason, timestamp) "
+        "VALUES (?, 'unapproved', 'approved', 'baseline', 'baseline', ?)",
+        ("aa:bb:cc:dd:ee:10", "2026-01-01T00:00:00+00:00"))
+    await db.db.commit()
+    # :11 is approved by a person.
+    await db.approve_device("aa:bb:cc:dd:ee:11", actor="alice")
 
-    touched = await db.baseline_set()
-    assert touched == 2
-
-    a10 = await db.get_device("aa:bb:cc:dd:ee:10")
-    a11 = await db.get_device("aa:bb:cc:dd:ee:11")
-    a12 = await db.get_device("aa:bb:cc:dd:ee:12")
-    assert a10.authorization == "approved"
-    assert a11.authorization == "approved"
-    assert a12.authorization == "rejected"
-    assert a10.authorized_by == "baseline"
+    reverted = await db.clear_baseline_attestations()
+    assert reverted == 1
+    assert (await db.get_device("aa:bb:cc:dd:ee:10")).authorization == "unapproved"
+    assert (await db.get_device("aa:bb:cc:dd:ee:11")).authorization == "approved"
 
 
 @pytest.mark.asyncio

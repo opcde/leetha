@@ -116,6 +116,26 @@ _TRUST_IOT_SCADA = {
     "umas": 0.85,
 }
 
+_TRUST_SATORI = {
+    # Satori feeds carried no entry at all, so every one of them silently
+    # fell back to FALLBACK_TRUST (0.50) -- well below the confidence each
+    # matcher reports. These are curated, device-specific fingerprints.
+    "satori_dhcp": 0.80,
+    "satori_useragent": 0.75,
+    "satori_ssh": 0.78,
+    "satori_web": 0.75,
+    "satori_smb": 0.78,
+    "satori_sip": 0.80,
+    "satori_tcp": 0.78,
+    # IANA is only a vendor-name fallback when Huginn has no row.
+    "iana_enterprise": 0.60,
+    # A structured "Mfg=...;Typ=...;Mod=..." vendor class is the device
+    # naming itself. Ranked above OUI (0.90) because an OUI device type is
+    # a guess from the vendor's main line of business -- HP registers the
+    # same prefixes for servers and printers -- whereas this is declared.
+    "dhcp_vendor_class": 0.92,
+}
+
 _TRUST_NEW_PROTOCOLS = {
     "igmp": 0.35,
     "eap": 0.60,
@@ -137,6 +157,7 @@ SOURCE_WEIGHTS: dict[str, float] = {
     **_TRUST_TIER_4,
     **_TRUST_INFRASTRUCTURE,
     **_TRUST_IOT_SCADA,
+    **_TRUST_SATORI,
     **_TRUST_NEW_PROTOCOLS,
 }
 

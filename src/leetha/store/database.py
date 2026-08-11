@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 from leetha.store.models import (
     Alert,
@@ -58,7 +61,8 @@ CREATE TABLE IF NOT EXISTS devices (
     passively_observed INTEGER NOT NULL DEFAULT 1,
     is_online          INTEGER NOT NULL DEFAULT 1,
     offline_since      TEXT,
-    presence_threshold_seconds INTEGER NOT NULL DEFAULT 300
+    presence_threshold_seconds INTEGER NOT NULL DEFAULT 300,
+    discovery_context  TEXT NOT NULL DEFAULT 'learning'
 );
 """
 
@@ -198,6 +202,16 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 );
 """
 
+_TABLE_SENSOR_STATE = """\
+CREATE TABLE IF NOT EXISTS sensor_state (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    first_capture_at  TEXT NOT NULL,
+    last_discovery_at TEXT NOT NULL,
+    window_closed_at  TEXT,
+    last_heartbeat_at TEXT
+);
+"""
+
 _ALL_TABLES = (
     _TABLE_DEVICES
     + _TABLE_OBSERVATIONS
@@ -211,6 +225,7 @@ _ALL_TABLES = (
     + _TABLE_SUPPRESSION_RULES
     + _TABLE_AUTH_TOKENS
     + _TABLE_AUTHORIZATION_HISTORY
+    + _TABLE_SENSOR_STATE
 )
 
 
@@ -310,6 +325,7 @@ def _marshal_device(rec: aiosqlite.Row) -> Device:
             else None
         ),
         presence_threshold_seconds=int(_opt("presence_threshold_seconds") or 300),
+        discovery_context=_opt("discovery_context") or "learning",
     )
 
 
@@ -385,6 +401,11 @@ class Database:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
         self._mu = asyncio.Lock()  # serialises writes
+        # MACs already in the devices table. Loaded lazily on first device
+        # write so "is this a new discovery?" costs a set lookup rather than a
+        # query on the hot path. Rebuilt per process, so a restart does not
+        # re-stamp known devices as new arrivals.
+        self._known_macs: set[str] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -433,6 +454,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_devices_criticality ON devices(criticality)",
             "CREATE INDEX IF NOT EXISTS idx_devices_location ON devices(location)",
             "CREATE INDEX IF NOT EXISTS idx_devices_authorization ON devices(authorization)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_discovery_context ON devices(discovery_context)",
             "CREATE INDEX IF NOT EXISTS idx_auth_hist_mac ON authorization_history(mac)",
             "CREATE INDEX IF NOT EXISTS idx_probe_status ON probe_targets(status)",
             "CREATE INDEX IF NOT EXISTS idx_fp_hist_mac ON fingerprint_history(mac)",
@@ -448,6 +470,11 @@ class Database:
         await self.backfill_identities()
         await self._clean_dirty_hostnames()
         await self._conn.commit()
+
+        # Seed the learning window now rather than on first access, so
+        # first_capture_at means "when this sensor started watching" instead of
+        # "whenever something first asked".
+        await self.get_sensor_state()
 
         # Fix DB file ownership when running under sudo
         from leetha.platform import fix_ownership
@@ -494,6 +521,11 @@ class Database:
              "ALTER TABLE devices ADD COLUMN offline_since TEXT"),
             ("presence_threshold_seconds",
              "ALTER TABLE devices ADD COLUMN presence_threshold_seconds INTEGER NOT NULL DEFAULT 300"),
+            # Automatic baseline — per-device discovery context. Existing rows
+            # backfill to 'learning': everything known at upgrade time is
+            # pre-existing inventory, not a new arrival.
+            ("discovery_context",
+             "ALTER TABLE devices ADD COLUMN discovery_context TEXT NOT NULL DEFAULT 'learning'"),
         ):
             if col_name not in dev_cols:
                 await self._conn.execute(col_sql)
@@ -604,7 +636,8 @@ INSERT INTO devices (
     raw_evidence, is_randomized_mac, correlated_mac,
     identity_id, manual_override,
     owner, location, criticality, tags, notes,
-    passively_observed, presence_threshold_seconds
+    passively_observed, presence_threshold_seconds,
+    discovery_context
 ) VALUES (
     ?1, ?2, ?3, ?4,
     ?5, ?6, ?7, ?8,
@@ -612,7 +645,8 @@ INSERT INTO devices (
     ?13, ?14, ?15,
     ?16, ?17,
     ?18, ?19, ?20, ?21, ?22,
-    ?23, ?24
+    ?23, ?24,
+    ?25
 )
 ON CONFLICT(mac) DO UPDATE SET
     hostname       = COALESCE(excluded.hostname, devices.hostname),
@@ -649,7 +683,11 @@ ON CONFLICT(mac) DO UPDATE SET
     presence_threshold_seconds = COALESCE(
         NULLIF(excluded.presence_threshold_seconds, 300),
         devices.presence_threshold_seconds
-    )
+    ),
+    -- discovery_context: stamped once at discovery, never overwritten. The
+    -- column is NOT NULL, so the existing value always wins the COALESCE —
+    -- first write is final, which is what keeps new_host grading stable.
+    discovery_context = COALESCE(devices.discovery_context, excluded.discovery_context)
 """
 
     @staticmethod
@@ -699,6 +737,40 @@ ON CONFLICT(mac) DO UPDATE SET
             dev.notes,
             int(dev.passively_observed),
             int(dev.presence_threshold_seconds),
+            dev.discovery_context or "learning",
+        )
+
+    async def _note_device_write(self, device: Device) -> bool:
+        """Stamp *device* with the live window state. True if it is a new MAC.
+
+        Called on every device write, so it must stay cheap: membership is
+        tested against an in-memory MAC set loaded once, and only a genuinely
+        new MAC costs anything further. Repeat sightings must not touch
+        last_discovery_at -- saturation measures *new devices*, not traffic
+        volume, or a chatty network would never look quiet and the window would
+        never close.
+
+        The stamp itself is advisory: discovery_context is first-write-wins in
+        SQL, so an existing row keeps whatever it was originally given.
+        """
+        if self._known_macs is None:
+            async with self._conn.execute("SELECT mac FROM devices") as cur:
+                self._known_macs = {r[0] for r in await cur.fetchall()}
+        if device.mac in self._known_macs:
+            return False
+
+        self._known_macs.add(device.mac)
+        if device.discovery_context is None:
+            state = await self.get_sensor_state()
+            device.discovery_context = (
+                "learning" if state["window_closed_at"] is None else "monitored"
+            )
+        return True
+
+    async def _record_discovery_no_commit(self, at: datetime | None = None) -> None:
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._conn.execute(
+            "UPDATE sensor_state SET last_discovery_at = ? WHERE id = 1", (stamp,)
         )
 
     async def upsert_device(self, device: Device) -> None:
@@ -707,18 +779,24 @@ ON CONFLICT(mac) DO UPDATE SET
         Acquires the write-lock and commits immediately.
         """
         assert self._conn is not None
+        is_new = await self._note_device_write(device)
         async with self._mu:
             await self._conn.execute(
                 self._DEVICE_UPSERT_SQL, self._device_bind_params(device),
             )
+            if is_new:
+                await self._record_discovery_no_commit()
             await self._conn.commit()
 
     async def upsert_device_no_commit(self, device: Device) -> None:
         """Persist a device without committing -- caller owns the transaction."""
         assert self._conn is not None
+        is_new = await self._note_device_write(device)
         await self._conn.execute(
             self._DEVICE_UPSERT_SQL, self._device_bind_params(device),
         )
+        if is_new:
+            await self._record_discovery_no_commit()
 
     async def get_device(self, mac: str) -> Device | None:
         """Look up a single device by its MAC address."""
@@ -840,6 +918,139 @@ ON CONFLICT(mac) DO UPDATE SET
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Sensor state — automatic baseline learning window
+    # ------------------------------------------------------------------
+
+    _SENSOR_STATE_COLUMNS = (
+        "first_capture_at", "last_discovery_at", "window_closed_at",
+        "last_heartbeat_at",
+    )
+
+    async def _seed_sensor_state(self) -> dict:
+        """Create the single sensor_state row.
+
+        On an upgraded install the sensor has been watching for a while, so
+        derive the window from observation history rather than stamping now().
+        Seeding first_capture_at to now() would restart the learning window and
+        silence genuinely new arrivals for a full window on every upgrade.
+        """
+        async with self._conn.execute(
+            "SELECT MIN(first_seen), MAX(first_seen) FROM devices "
+            "WHERE first_seen IS NOT NULL"
+        ) as cur:
+            row = await cur.fetchone()
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        first_capture = (row[0] if row else None) or now_iso
+        last_discovery = (row[1] if row else None) or now_iso
+
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO sensor_state "
+            "(id, first_capture_at, last_discovery_at, last_heartbeat_at) "
+            "VALUES (1, ?, ?, ?)",
+            (first_capture, last_discovery, now_iso),
+        )
+        await self._conn.commit()
+        return {
+            "first_capture_at": first_capture,
+            "last_discovery_at": last_discovery,
+            "window_closed_at": None,
+            "last_heartbeat_at": now_iso,
+        }
+
+    async def get_sensor_state(self) -> dict:
+        """Return the single sensor_state row, seeding it if absent."""
+        assert self._conn is not None
+        async with self._conn.execute(
+            "SELECT first_capture_at, last_discovery_at, window_closed_at, "
+            "last_heartbeat_at FROM sensor_state WHERE id = 1"
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            async with self._mu:
+                return await self._seed_sensor_state()
+        return dict(zip(self._SENSOR_STATE_COLUMNS, row))
+
+    async def _set_sensor_state(self, column: str, value: str | None) -> None:
+        """Update one sensor_state column, seeding the row first if needed."""
+        assert self._conn is not None
+        if column not in self._SENSOR_STATE_COLUMNS:
+            raise ValueError(f"unknown sensor_state column: {column}")
+        await self.get_sensor_state()
+        async with self._mu:
+            await self._conn.execute(
+                f"UPDATE sensor_state SET {column} = ? WHERE id = 1", (value,)
+            )
+            await self._conn.commit()
+
+    async def mark_discovery(self, *, at: datetime | None = None) -> None:
+        """Record that a never-before-seen MAC just appeared."""
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("last_discovery_at", stamp)
+
+    async def close_learning_window(self, *, at: datetime | None = None) -> None:
+        """Mark the network as learned. A no-op if already closed.
+
+        Devices are graded against this timestamp, so moving it on an
+        already-closed window would silently re-grade history.
+        """
+        state = await self.get_sensor_state()
+        if state["window_closed_at"] is not None:
+            return
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("window_closed_at", stamp)
+
+    async def reopen_learning_window(self) -> None:
+        """Re-enter learning (discovery burst, or a long sensor outage)."""
+        await self._set_sensor_state("window_closed_at", None)
+
+    async def apply_burst_reentry(self, macs: list[str]) -> int:
+        """Re-enter learning and correct the devices caught by a burst.
+
+        Findings fire per device as devices arrive, so the first few of a burst
+        have already emitted WARNINGs before the burst is recognisable. Rather
+        than delay grading pipeline-wide for one edge case, those findings are
+        corrected after the fact: contexts flip back to 'learning' and the
+        emitted new_host rows are downgraded to INFO.
+
+        Rows are only ever updated -- never deleted. The learning window is a
+        severity layer and must not remove evidence already captured.
+        """
+        assert self._conn is not None
+        if not macs:
+            return 0
+        placeholders = ",".join("?" * len(macs))
+        async with self._mu:
+            await self._conn.execute(
+                f"UPDATE devices SET discovery_context = 'learning' "
+                f"WHERE mac IN ({placeholders})",
+                macs,
+            )
+            try:
+                await self._conn.execute(
+                    f"UPDATE findings SET severity = 'info' "
+                    f"WHERE rule = 'new_host' AND severity = 'warning' "
+                    f"AND hw_addr IN ({placeholders})",
+                    macs,
+                )
+            except Exception as exc:
+                # `findings` belongs to the Store layer, not Database, so it is
+                # absent in bare-Database contexts. The context flip above is
+                # the authoritative correction; the severity rewrite is a
+                # cosmetic catch-up for rows already emitted.
+                logger.debug("burst finding downgrade skipped: %s", exc)
+            await self._conn.execute(
+                "UPDATE sensor_state SET window_closed_at = NULL WHERE id = 1"
+            )
+            await self._conn.commit()
+        return len(macs)
+
+    async def record_heartbeat(self, *, at: datetime | None = None) -> None:
+        """Record that the sensor is alive, for outage detection on restart."""
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("last_heartbeat_at", stamp)
+
     async def baseline_reset(self, *, actor: str = "baseline") -> int:
         """Revert every device back to 'unapproved' and record history rows.
 
@@ -871,31 +1082,54 @@ ON CONFLICT(mac) DO UPDATE SET
             await self._conn.commit()
         return len(rows)
 
-    async def baseline_set(self, *, actor: str = "baseline") -> int:
-        """Approve every currently-unapproved device. Returns count touched."""
+    async def clear_baseline_attestations(self, *, actor: str = "baseline-cleanup") -> int:
+        """Revert approvals that came from the old bulk `baseline set`.
+
+        Approval means "a human confirmed this device and confirmed leetha's
+        fingerprint of it is accurate". `baseline set` stamped that onto every
+        device at once and wrote an audit row claiming as much, when nobody had
+        looked. Those rows are identifiable by reason = 'baseline'.
+
+        Devices a human approved individually are left untouched. Reverting is
+        free now that approval no longer drives alert severity.
+        """
         assert self._conn is not None
         now_iso = datetime.now(timezone.utc).isoformat()
         async with self._mu:
             async with self._conn.execute(
-                "SELECT mac FROM devices WHERE authorization = 'unapproved'"
+                "SELECT DISTINCT mac FROM authorization_history "
+                "WHERE reason = 'baseline' AND new_state = 'approved'"
             ) as cur:
-                macs = [row[0] for row in await cur.fetchall()]
-            if not macs:
+                candidates = [row[0] for row in await cur.fetchall()]
+            if not candidates:
                 return 0
-            for mac in macs:
+
+            reverted = []
+            for mac in candidates:
+                # Only revert if the *latest* transition is still the bulk one;
+                # a later hand-approval or rejection is a real human decision.
+                async with self._conn.execute(
+                    "SELECT reason, new_state FROM authorization_history "
+                    "WHERE mac = ? ORDER BY id DESC LIMIT 1", (mac,),
+                ) as cur:
+                    last = await cur.fetchone()
+                if not last or last[0] != "baseline":
+                    continue
                 await self._conn.execute(
-                    "UPDATE devices SET authorization = 'approved', "
-                    "authorized_at = ?, authorized_by = ? WHERE mac = ?",
-                    (now_iso, actor, mac),
+                    "UPDATE devices SET authorization = 'unapproved', "
+                    "authorized_at = NULL, authorized_by = NULL "
+                    "WHERE mac = ? AND authorization = 'approved'", (mac,),
                 )
                 await self._conn.execute(
                     "INSERT INTO authorization_history "
                     "(mac, previous_state, new_state, actor, reason, timestamp) "
-                    "VALUES (?, 'unapproved', 'approved', ?, 'baseline', ?)",
+                    "VALUES (?, 'approved', 'unapproved', ?, "
+                    "'baseline-attestation-cleared', ?)",
                     (mac, actor, now_iso),
                 )
+                reverted.append(mac)
             await self._conn.commit()
-        return len(macs)
+        return len(reverted)
 
     # Phase A.4 — presence heartbeat helpers ------------------------------
 

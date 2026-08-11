@@ -294,6 +294,26 @@ class LeethaApp:
 
         self._tasks.append(asyncio.create_task(_unsnooze_loop()))
 
+        # Automatic baseline — advance the learning window and keep a heartbeat
+        # so a long outage can be detected on the next start.
+        from leetha.baseline import evaluate_window, recover_from_outage
+
+        try:
+            await recover_from_outage(self.db, self.config)
+        except Exception as e:
+            logger.debug("Baseline outage check failed: %s", e)
+
+        async def _baseline_loop():
+            while self._running:
+                await asyncio.sleep(60)
+                try:
+                    await evaluate_window(self.db, self.config)
+                    await self.db.record_heartbeat()
+                except Exception as e:
+                    logger.debug("Learning-window check failed: %s", e)
+
+        self._tasks.append(asyncio.create_task(_baseline_loop()))
+
         # If interfaces were provided at construction time, start capture
         # immediately (CLI mode with -i flag).
         if self.config.interfaces:
@@ -641,7 +661,7 @@ class LeethaApp:
             "p0f", "ja3", "ja4", "iana_enterprise",  # tiny files first
             "satori_dhcp", "satori_useragent", "satori_tcp",  # Satori (all <1MB)
             "satori_smb", "satori_ssh", "satori_web",
-            "satori_sip", "satori_ntp",
+            "satori_sip",
             "huginn_combinations", "huginn_dhcpv6",
             "huginn_dhcp_vendor", "huginn_dhcpv6_enterprise",
             "huginn_devices",

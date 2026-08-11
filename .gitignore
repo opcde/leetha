@@ -10,6 +10,12 @@ __pycache__/
 # Build output
 build/
 dist/
+# ...except the compiled dashboard, which ships inside the Python package.
+# Leetha is installed from git rather than PyPI, so if this is not committed
+# there is no path by which a user gets a working web UI without installing
+# bun and building it themselves.
+!src/leetha/ui/web/dist/
+!src/leetha/ui/web/dist/**
 *.whl
 
 # Virtual environments

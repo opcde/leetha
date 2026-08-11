@@ -83,12 +83,22 @@ async def test_revoke_command(seeded_db):
 
 
 @pytest.mark.asyncio
-async def test_baseline_set_command(seeded_db, capsys):
+async def test_baseline_set_command_is_removed(seeded_db, capsys):
+    """Scripts still calling it get a clear explanation, not silent new behaviour."""
     from leetha.cli_device import handle_baseline_command
     rc = await handle_baseline_command(_ns(baseline_action="set"))
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "removed" in err
+    assert "baseline finish" in err
+
+
+@pytest.mark.asyncio
+async def test_baseline_finish_command(seeded_db, capsys):
+    from leetha.cli_device import handle_baseline_command
+    rc = await handle_baseline_command(_ns(baseline_action="finish"))
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "3" in out  # 3 seeded devices
+    assert "Learning finished" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -98,3 +108,4 @@ async def test_baseline_status_command(seeded_db, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "unapproved=3" in out
+    assert "learning=" in out

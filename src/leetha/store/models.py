@@ -63,6 +63,14 @@ class Device:
     is_online: bool = True
     offline_since: datetime | None = None
     presence_threshold_seconds: int = 300
+    # Automatic baseline — the sensor's learning state when this device was
+    # first discovered. Stamped once and never overwritten, so new_host
+    # severity cannot be re-graded by later upserts or window transitions.
+    #
+    # None means "the store decides": it stamps the live window state on a
+    # genuinely new MAC. An explicit value is honoured, which is what lets
+    # tests and importers seed a specific context.
+    discovery_context: str | None = None  # 'learning' | 'monitored' | None
 
     def to_dict(self) -> dict:
         import re
@@ -186,6 +194,7 @@ class Device:
             is_online=bool(_get("is_online", 26, 1) if _get("is_online", 26, 1) is not None else 1),
             offline_since=_dt_opt("offline_since", 27),
             presence_threshold_seconds=int(_get("presence_threshold_seconds", 28, 300) or 300),
+            discovery_context=_get("discovery_context", 29, "learning") or "learning",
         )
 
 

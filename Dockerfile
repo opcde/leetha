@@ -15,7 +15,9 @@ RUN bun run build
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS compile
 
 WORKDIR /src
-COPY pyproject.toml uv.lock README.md ./
+# hatch_build.py is referenced by pyproject.toml as a build hook, so the
+# wheel build fails without it even though this stage supplies a real dist/.
+COPY pyproject.toml uv.lock README.md hatch_build.py ./
 COPY src/ src/
 COPY docs/wiki docs/wiki
 COPY --from=frontend /app/src/leetha/ui/web/dist/ src/leetha/ui/web/dist/

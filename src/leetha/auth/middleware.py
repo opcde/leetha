@@ -20,6 +20,9 @@ EXEMPT_PATHS = frozenset({
 EXEMPT_PREFIXES = (
     "/assets/",
     "/ws",
+    # Read-only topology snapshots. These carry their own share key, which is
+    # validated by the endpoint itself and grants nothing beyond the picture.
+    "/share/",
 )
 
 

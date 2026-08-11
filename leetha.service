@@ -1,19 +1,48 @@
 [Unit]
 Description=Leetha - passive network fingerprinting
+Documentation=https://github.com/tjnull/leetha
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Path produced by a system-wide install:
+#   sudo pipx install --global /path/to/leetha
+# A per-user "pipx install" lands in ~/.local/bin and is not suitable for a
+# system service; adjust this line if you installed somewhere else.
 ExecStart=/usr/local/bin/leetha --service
 Restart=on-failure
 RestartSec=5
+
 User=leetha
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+Group=leetha
+
+# State lives in /var/lib/leetha, created and chowned by systemd on start.
+# Both variables matter: the database, the fingerprint cache, and the admin
+# token all follow LEETHA_DATA_DIR, so pointing it at a real directory keeps
+# the admin token stable across restarts.
+StateDirectory=leetha
+Environment=LEETHA_DATA_DIR=/var/lib/leetha
+Environment=LEETHA_CACHE_DIR=/var/lib/leetha/cache
+
+# CAP_NET_RAW/CAP_NET_ADMIN allow packet capture without running as root.
+# CAP_NET_BIND_SERVICE is required because --service serves the web UI on
+# port 443 by default; without it the service cannot bind and exits at start.
+# Drop it if you set the port above 1024.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+
+# Sandboxing. ProtectHome is safe now that no state lives under /home.
 ProtectSystem=strict
-ReadWritePaths=/home/leetha/.leetha
-ProtectHome=tmpfs
+ProtectHome=yes
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

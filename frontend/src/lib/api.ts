@@ -977,6 +977,23 @@ export async function deleteTopologyOverride(mac: string) {
   return apiFetch<{ status: string }>(`/api/topology/override/${mac}`, { method: "DELETE" });
 }
 
+export async function fetchTopologyShareStatus(): Promise<{ enabled: boolean }> {
+  return apiFetch("/api/topology/share");
+}
+
+/** Mint or rotate the read-only share link. The raw key is returned once. */
+export async function createTopologyShareLink(): Promise<{
+  key: string;
+  url: string;
+  note: string;
+}> {
+  return apiFetch("/api/topology/share", { method: "POST" });
+}
+
+export async function revokeTopologyShareLink(): Promise<{ revoked: boolean }> {
+  return apiFetch("/api/topology/share", { method: "DELETE" });
+}
+
 export async function fetchTopologyOverrides(): Promise<{
   overrides: Array<{ child_mac: string; parent_mac: string }>;
 }> {

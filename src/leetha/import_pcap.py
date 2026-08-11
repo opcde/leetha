@@ -44,13 +44,20 @@ def _classify_frame(frame, interface_tag: str):
     for parser in PARSER_CHAIN:
         try:
             result = parser(frame)
-            if result is not None:
-                if isinstance(result, list):
-                    for pkt in result:
-                        pkt.interface = interface_tag
-                    return result
-                result.interface = interface_tag
+            if result is None:
+                continue
+            if isinstance(result, list):
+                # List-returning parsers (e.g. parse_dns_answer) yield an
+                # empty list for traffic they don't recognise. That is a
+                # "no match" -- not a result -- so the chain must keep
+                # walking, otherwise every parser after it is unreachable.
+                if not result:
+                    continue
+                for pkt in result:
+                    pkt.interface = interface_tag
                 return result
+            result.interface = interface_tag
+            return result
         except Exception:
             continue
     return None

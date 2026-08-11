@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi import (
+    FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File,
+    HTTPException,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
@@ -25,6 +28,117 @@ logger = logging.getLogger(__name__)
 web_dir = Path(__file__).parent
 app_instance: LeethaApp | None = None
 _auth_enabled: bool = False
+
+#: Seconds uvicorn may spend draining connections on shutdown.
+#:
+#: uvicorn's own default is None, i.e. wait forever. The dashboard keeps a
+#: websocket open for live device updates, so there is always at least one
+#: connection that will not close on its own -- which left Ctrl+C sitting on
+#: "Waiting for connections to close" until the user hammered it into a force
+#: quit. Bounding the drain makes shutdown terminate on its own.
+WEB_SHUTDOWN_TIMEOUT = 3
+
+#: Signalled when the server is shutting down, so streaming endpoints can stop
+#: waiting on an idle queue and close their connection.
+_web_shutdown = asyncio.Event()
+
+
+def get_web_shutdown_event() -> asyncio.Event:
+    return _web_shutdown
+
+
+async def _next_event_or_shutdown(queue, shutdown: asyncio.Event):
+    """Await the next event, or return None if shutdown is signalled first.
+
+    Streaming endpoints block on ``queue.get()``, which never returns on a
+    quiet network. Racing it against the shutdown event lets those connections
+    close promptly instead of holding the drain open.
+    """
+    if shutdown.is_set():
+        return None
+
+    get_task = asyncio.ensure_future(queue.get())
+    stop_task = asyncio.ensure_future(shutdown.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if get_task in done:
+            return get_task.result()
+        return None
+    finally:
+        for task in (get_task, stop_task):
+            if not task.done():
+                task.cancel()
+
+
+def request_immediate_shutdown(server) -> None:
+    """Stop the server now, skipping the graceful drain.
+
+    Setting force_exit alone is not enough. uvicorn skips its two "waiting
+    for..." loops, but then still awaits ``asyncio.Server.wait_closed()``,
+    which blocks until every client socket closes -- a browser holding
+    keep-alive connections open never does, so shutdown burned the whole
+    graceful-shutdown timeout regardless. The timeout is read from config at
+    that moment, so shrinking it here makes the wait expire at once.
+    """
+    server.should_exit = True
+    server.force_exit = True
+    try:
+        server.config.timeout_graceful_shutdown = 0
+    except Exception:  # pragma: no cover - config is always present in practice
+        pass
+
+
+def _release_uvicorn_signals(server) -> None:
+    """Stop uvicorn taking over SIGINT, so the console's handler survives.
+
+    uvicorn <=0.28 called ``install_signal_handlers()``, and overriding that
+    attribute was enough. Modern uvicorn (this project ships 0.52) instead
+    wraps serve() in a ``capture_signals()`` context manager, so the old
+    override silently did nothing: uvicorn replaced the console's two-stage
+    Ctrl+C handler with its own, and the console's force-quit path -- the
+    thing that makes the first Ctrl+C exit at once -- became unreachable.
+    Neutralise whichever mechanism this version uses.
+    """
+    @contextmanager
+    def _noop():
+        yield
+
+    if hasattr(server, "capture_signals"):
+        server.capture_signals = _noop
+    # Harmless on versions that no longer call it.
+    server.install_signal_handlers = lambda: None
+
+
+async def _watch_server_exit(server, shutdown: asyncio.Event,
+                             poll: float = 0.1) -> None:
+    """Set *shutdown* as soon as the server starts shutting down.
+
+    Signalling from run_web_async's ``finally`` was too late to be useful:
+    ``serve()`` does not return until the connection drain completes, and the
+    drain was waiting on the very connections that were waiting on this event.
+    Watching ``should_exit`` breaks that circle -- streaming endpoints learn
+    about the shutdown while there is still time to close cleanly, instead of
+    being cancelled when the timeout expires.
+    """
+    try:
+        while not getattr(server, "should_exit", False):
+            await asyncio.sleep(poll)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        shutdown.set()
+
+
+def _build_uvicorn_config(*, app, host: str, port: int,
+                          ssl_keyfile, ssl_certfile) -> "uvicorn.Config":
+    """Build the uvicorn config, with a bounded shutdown drain."""
+    return uvicorn.Config(
+        app, host=host, port=port, log_level="info",
+        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+        timeout_graceful_shutdown=WEB_SHUTDOWN_TIMEOUT,
+    )
 
 
 @asynccontextmanager
@@ -330,6 +444,16 @@ _WIKI_PAGES = [
     ("spoofing-detection", "Spoofing-Detection.md", "Spoofing Detection"),
     ("web-dashboard", "Web-Dashboard.md", "Web Dashboard"),
     ("cli-reference", "CLI-Reference.md", "CLI Reference"),
+    # These pages ship in the package but were missing from the registry,
+    # so the built-in docs viewer could not reach them.
+    ("inventory-sources", "Inventory-Sources.md", "Inventory Sources"),
+    ("device-authorization", "Device-Authorization.md", "Device Authorization"),
+    ("custom-properties", "Custom-Properties.md", "Custom Properties"),
+    ("presence-monitoring", "Presence-Monitoring.md", "Presence Monitoring"),
+    ("pcap-import", "PCAP-Import.md", "PCAP Import"),
+    ("remote-sensors", "Remote-Sensors.md", "Remote Sensors"),
+    ("authentication", "Authentication.md", "Authentication"),
+    ("notifications", "Notifications.md", "Notifications"),
 ]
 
 _WIKI_SLUG_MAP = {slug: (fn, title) for slug, fn, title in _WIKI_PAGES}
@@ -2628,6 +2752,79 @@ async def api_top_connections():
 _topology_cache: dict = {"data": None, "ts": 0}
 
 
+@fastapi_app.get("/api/topology/export.svg")
+async def api_topology_export_svg():
+    """Render the current topology as a standalone SVG document."""
+    from fastapi.responses import Response
+    from leetha.ui.web.topology_export import render_topology_svg
+
+    graph = await api_topology()
+    svg = render_topology_svg(graph)
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": 'attachment; filename="leetha-topology.svg"'},
+    )
+
+
+@fastapi_app.get("/api/topology/share")
+async def api_topology_share_status():
+    """Report whether a read-only share link is currently active."""
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import share_key_exists
+
+    return {"enabled": share_key_exists(get_config().data_dir)}
+
+
+@fastapi_app.post("/api/topology/share")
+async def api_topology_share_create():
+    """Mint (or rotate) the read-only share key.
+
+    The raw key is returned exactly once -- only its digest is stored -- so
+    rotating immediately invalidates any previously issued link.
+    """
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import create_share_key
+
+    key = create_share_key(get_config().data_dir)
+    return {
+        "key": key,
+        "url": f"/share/{key}/topology.svg",
+        "note": "Shown once. Rotating or revoking invalidates existing links.",
+    }
+
+
+@fastapi_app.delete("/api/topology/share")
+async def api_topology_share_revoke():
+    """Revoke the share link."""
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import revoke_share_key
+
+    return {"revoked": revoke_share_key(get_config().data_dir)}
+
+
+@fastapi_app.get("/share/{key}/topology.svg")
+async def api_shared_topology_svg(key: str):
+    """Read-only topology snapshot for holders of a valid share key.
+
+    Exempt from API auth by design, but the key grants nothing except this
+    picture -- it is never accepted as an API token.
+    """
+    from fastapi.responses import Response
+    from leetha.config import get_config
+    from leetha.ui.web.topology_export import render_topology_svg, verify_share_key
+
+    if not verify_share_key(key, get_config().data_dir):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    graph = await api_topology()
+    return Response(
+        content=render_topology_svg(graph),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @fastapi_app.get("/api/topology/overrides")
 async def api_topology_overrides():
     """List all manual topology connection overrides."""
@@ -3212,7 +3409,11 @@ async def websocket_endpoint(websocket: WebSocket):
     events = app_instance.subscribe()
     try:
         while True:
-            event = await events.get()
+            # Race the queue against shutdown: on a quiet network get() never
+            # returns, and uvicorn would wait on this connection forever.
+            event = await _next_event_or_shutdown(events, _web_shutdown)
+            if event is None:
+                break
             # Pass through import events directly
             if isinstance(event, dict) and event.get("type") in ("import_progress", "import_complete", "finding_created"):
                 await websocket.send_json(event)
@@ -3336,7 +3537,11 @@ async def websocket_console(websocket: WebSocket):
     events = app_instance.subscribe()
     try:
         while True:
-            event = await events.get()
+            # Race the queue against shutdown: on a quiet network get() never
+            # returns, and uvicorn would wait on this connection forever.
+            event = await _next_event_or_shutdown(events, _web_shutdown)
+            if event is None:
+                break
             # Pass through import events directly
             if isinstance(event, dict) and event.get("type") in ("import_progress", "import_complete", "finding_created"):
                 await websocket.send_json(event)
@@ -3645,7 +3850,8 @@ def run_web(interfaces: list | None = None, host: str = "0.0.0.0", port: int = 4
 
     logger.info("Leetha web UI: %s://%s:%d", scheme, host, port)
     uvicorn.run(_wrapped_app, host=host, port=port, log_level="info",
-                ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
+                ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+                timeout_graceful_shutdown=WEB_SHUTDOWN_TIMEOUT)
 
 
 async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", port: int = 443, app: LeethaApp | None = None, force_auth=None, tls: bool = True, tls_cert: str = "", tls_key: str = ""):
@@ -3682,20 +3888,30 @@ async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", p
             ssl_certfile = str(cert_path)
             ssl_keyfile = str(key_path)
 
-    config = uvicorn.Config(_wrapped_app, host=host, port=port, log_level="info",
-                            ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
+    config = _build_uvicorn_config(
+        app=_wrapped_app, host=host, port=port,
+        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+    )
     server = uvicorn.Server(config)
-    # Disable uvicorn's own signal handlers — the console manages SIGINT
-    # and sets server.should_exit / force_exit directly.
-    server.install_signal_handlers = lambda: None
+    # Fresh run: clear any shutdown flag left by a previous `web` invocation
+    # from the console, otherwise streaming endpoints exit immediately.
+    _web_shutdown.clear()
+    _release_uvicorn_signals(server)
     global _last_server
     _last_server = server
+    # Watch for shutdown *while* serving: the finally block below runs only
+    # after serve() returns, which is after the drain -- far too late to let
+    # streaming endpoints close in time to shorten it.
+    watcher = asyncio.ensure_future(_watch_server_exit(server, _web_shutdown))
     try:
         await server.serve()
     except (KeyboardInterrupt, asyncio.CancelledError):
         server.should_exit = True
         server.force_exit = True
     finally:
+        _web_shutdown.set()
+        if not watcher.done():
+            watcher.cancel()
         _last_server = None
 
 _last_server: uvicorn.Server | None = None

@@ -26,15 +26,18 @@
 - **Infrastructure-aware mDNS filtering** -- automatically detects routers/gateways/APs and suppresses forwarded multicast that would pollute device identity
 - **30 protocol banner matchers** -- passively reads service banners (SSH, MySQL, SMB, RDP, MQTT, RTSP, and more) from observed traffic
 - **315 active probe plugins** -- protocol-specific request/response parsing, not just banner grabs
-- **11.5 million fingerprint signatures** -- synced from 12 upstream databases including IEEE OUI, Huginn-Muninn, Satori, p0f, JA3/JA4
+- **1.2 million fingerprint signatures** -- synced from 19 upstream feeds including IEEE OUI, Huginn-Muninn, Satori, p0f, Rapid7 Recog, JA3/JA4
 - **Real-time web dashboard** -- host inventory with numeric IP sorting, live packet stream, network topology, and attack surface analysis via WebSocket
 - **PCAP import** -- import captured traffic from Wireshark or tcpdump for offline analysis through the full fingerprinting pipeline
 - **Behavioral detection** -- DNS vendor affinity drift, identity shift alerts, MAC spoofing detection, DHCP anomaly analysis
 - **OT / ICS / SCADA support** -- passive identification of Modbus, BACnet, EtherNet/IP, CoAP, MQTT, and industrial device fingerprinting
-- **Tri-state device authorization** -- every host is approved, unapproved, or rejected; `new_host` severity grades accordingly (approved → INFO, unapproved → WARNING, rejected → CRITICAL). Bulk "set baseline" silences an established network in one click.
+- **Automatic baseline** -- leetha stays quiet while it is still learning a network and escalates only devices that arrive afterwards, so a fresh deployment does not alert on hosts that were already there. The learning window closes on discovery saturation rather than a timer, which suits both a one-hour assessment and a multi-week sensor.
+- **Tri-state device authorization** -- approved / unapproved / rejected records whether a human has confirmed a device *and* confirmed leetha's fingerprint of it. It is never set automatically; `rejected` escalates that device's findings to CRITICAL.
 - **Custom device properties** -- annotate devices with owner, location, criticality (low/medium/high/critical), free-form tags, and notes. All fields are filterable and searchable.
 - **Presence heartbeat** -- per-device offline-threshold sweeper emits `device_went_offline` / `device_came_online` findings when a host stops or resumes traffic.
 - **Inventory importers** -- extensible subsystem that ingests DHCP lease files (ISC dhcpd and dnsmasq formats) to pre-populate the device inventory; `passively_observed` flag suppresses noise until a live packet arrives. AES-GCM credential store for future importers needing secrets.
+- **Inventory integrations** -- Proxmox VE (nodes, VMs, LXC -- correlates captured MACs to named guests and their hypervisor), Zigbee2MQTT and Z-Wave JS (imports smart-home devices that never touch IP and are therefore invisible to passive capture)
+- **Topology export & sharing** -- server-rendered SVG of the network map, plus optional key-protected read-only share links for handing a map to someone without an account
 - **Auth & notifications** -- token-based API authentication with role-based access control; alert notifications via Apprise (Slack, email, webhooks, and 80+ services)
 
 ## How It Works
@@ -78,10 +81,8 @@ Capture Engine -----> Parser Chain (20 protocol parsers)
 Requires **Python 3.11+** and packet capture privileges (root, sudo, or `CAP_NET_RAW`).
 
 ```bash
-# Install from source
-git clone https://github.com/tjnull/leetha.git && cd leetha
-cd frontend && bun install && bun run build && cd ..
-pipx install -e .  # or: pip install -e .
+# Install (dashboard included — no build step)
+pipx install git+https://github.com/tjnull/leetha.git
 
 # Sync fingerprint databases (recommended, ~880 MB)
 leetha sync
@@ -102,11 +103,15 @@ Open `https://localhost` to view discovered devices in real-time.
 
 ### From source (pipx — recommended)
 
+Leetha is not on PyPI — install from the repository. The compiled dashboard
+ships in the repo, so the frontend build is only needed if you are changing
+the UI.
+
 ```bash
 git clone https://github.com/tjnull/leetha.git
 cd leetha
 
-# Build the frontend (requires bun — https://bun.sh)
+# Only needed when developing the frontend (requires bun — https://bun.sh)
 cd frontend && bun install && bun run build && cd ..
 
 # Install with pipx (isolated environment, editable)
@@ -115,6 +120,18 @@ pipx install -e .
 # Or install with pip
 pip install -e .
 ```
+
+### One-line install (no build step)
+
+The compiled dashboard is committed to the repository, so installing straight
+from the URL gives you the full web UI — no bun, no build step:
+
+```bash
+pipx install git+https://github.com/tjnull/leetha.git
+```
+
+You only need the `bun run build` step above if you are **developing** the
+frontend.
 
 ### Docker
 
@@ -133,6 +150,75 @@ The Docker image exposes port 443 (HTTPS) by default. All three capabilities abo
 ```bash
 docker compose up -d
 ```
+
+### systemd service
+
+`pipx install -e .` installs into `~/.local/bin`, which is fine for
+interactive use but not for a system service. For an always-on deployment,
+install system-wide and run under the bundled unit:
+
+```bash
+# 1. System-wide install -> /usr/local/bin/leetha
+sudo pipx install --global .
+
+# 2. Unprivileged service account
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin leetha
+
+# 3. Install the unit
+sudo cp leetha.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# 4. Choose the capture interface (state lives in /var/lib/leetha)
+sudo -u leetha LEETHA_DATA_DIR=/var/lib/leetha LEETHA_CACHE_DIR=/var/lib/leetha/cache \
+  leetha interfaces add eth0
+
+# 5. Start
+sudo systemctl enable --now leetha
+```
+
+The unit runs as the unprivileged `leetha` user with only
+`CAP_NET_RAW`, `CAP_NET_ADMIN`, and `CAP_NET_BIND_SERVICE` — the last is
+required for the default port 443, so drop it only if you move the web UI
+above port 1024. State (database, fingerprint cache, TLS CA, and the admin
+token) lives in `/var/lib/leetha` via `StateDirectory=`, so it survives
+restarts and reinstalls.
+
+Retrieve the admin token with:
+
+```bash
+sudo cat /var/lib/leetha/admin-token
+```
+
+### Inventory integrations
+
+Beyond passive capture, leetha can import devices from systems that already
+know about them. Configure these from **Sync → Inventory Sources** in the web
+UI, or via the inventory API.
+
+| Importer | What it adds | Credentials |
+|---|---|---|
+| `dhcp_leases` | Hosts from ISC dhcpd / dnsmasq lease files | none (local file) |
+| `proxmox` | Nodes, VMs, and LXC containers — correlates captured MACs to named guests and their hypervisor | read-only `PVEAuditor` API token |
+| `zigbee2mqtt` | Paired Zigbee devices | MQTT broker (optional auth) |
+| `zwave_js` | Z-Wave nodes from Z-Wave JS UI | MQTT broker (optional auth) |
+
+The Zigbee and Z-Wave importers matter because those devices **never touch
+IP** — no amount of passive listening will ever see them. Zigbee EUI-64
+addresses embed a real IEEE OUI, so imported devices still resolve a vendor
+through the normal lookup.
+
+Creating the Proxmox token:
+
+```bash
+pveum user add leetha@pve
+pveum aclmod / --users leetha@pve --roles PVEAuditor
+pveum user token add leetha@pve inventory --privsep 0
+```
+
+Secrets are held in the AES-GCM credential store under the data directory,
+never in plaintext config. See the
+[Inventory Sources](docs/wiki/Inventory-Sources.md) wiki page for the full
+config schema of each importer.
 
 ### Docker customization
 

@@ -35,8 +35,8 @@ leetha auth revoke-token <token-id>
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | Full access: settings, capture control, token management, delete alerts, **device authorization, bulk auth, baseline, inventory imports** |
-| `analyst` | Read access: devices, alerts, stats. Can acknowledge alerts. Can PATCH device custom properties (owner, location, criticality, tags, notes, presence threshold). Cannot change authorization state, cannot run baseline, cannot upload inventory files. |
+| `admin` | Full access: settings, capture control, token management, delete alerts, **device authorization, bulk auth, baseline/learning window, inventory imports** |
+| `analyst` | Read access: devices, alerts, stats. Can acknowledge alerts. Can PATCH device custom properties (owner, location, criticality, tags, notes, presence threshold). Cannot change authorization state, cannot control the learning window, cannot upload inventory files. |
 
 ### Admin-only endpoints
 
@@ -48,7 +48,7 @@ The role gate (`leetha/auth/roles.py`) enforces admin-only access on:
 - `DELETE /api/alerts/*`, `/api/trust/*`, `/api/suppressions/*`, `/api/patterns/*`
 - Authorization transitions: `POST /api/devices/{mac}/approve`, `.../reject`, `.../revoke`
 - Bulk authorization: `POST /api/devices/bulk/authorization`
-- Baseline: `POST /api/baseline/set`, `POST /api/baseline/reset`
+- Baseline: `POST /api/baseline/finish`, `POST /api/baseline/restart-learning`, `POST /api/baseline/clear-attestations`, `POST /api/baseline/reset`
 - Inventory imports: `POST /api/inventory/*` (e.g. DHCP lease upload)
 
 Analyst tokens that hit an admin-only path receive HTTP 403 with `{"error": "Admin access required."}`.

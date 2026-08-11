@@ -28,8 +28,10 @@ Key interactions:
 - **Bulk authorization** — select rows via checkboxes to reveal an Approve / Reject /
   Revoke / Clear toolbar that applies to the selection via
   `POST /api/devices/bulk/authorization`
-- **"Set baseline" banner** appears at the top when `approved < 5` and no baseline
-  has been set — one click bulk-approves every discovered device
+- **Discovery context filter** — show only devices that arrived after leetha
+  learned the network, or only those found during the initial learning period.
+  Learning-window policy itself lives in Settings → Discovery & Alerting; the
+  old "Set baseline" banner has been removed
 - CSV or JSON bulk export (includes owner, location, criticality, tags, notes,
   authorization, `is_online`, `offline_since`, `presence_threshold_seconds`)
 - Toggle between identity-grouped view (merges randomized MACs) and raw MAC view
@@ -145,9 +147,11 @@ All alert types flow into findings: new devices, OS changes, MAC randomization, 
 | POST | `/api/devices/{mac}/reject` | admin | Reject device, record audit row |
 | POST | `/api/devices/{mac}/revoke` | admin | Return device to unapproved state |
 | POST | `/api/devices/bulk/authorization` | admin | Apply `approve`/`reject`/`revoke` to up to 500 MACs at once |
-| POST | `/api/baseline/set` | admin | Approve every currently-unapproved device |
+| POST | `/api/baseline/finish` | admin | Close the learning window; start alerting on new arrivals |
+| POST | `/api/baseline/restart-learning` | admin | Re-enter learning |
+| POST | `/api/baseline/clear-attestations` | admin | Undo approvals made by the removed bulk command |
 | POST | `/api/baseline/reset` | admin | Return every non-unapproved device back to unapproved |
-| GET | `/api/baseline/status` | analyst | `{approved, unapproved, rejected, last_baseline_at}` counts |
+| GET | `/api/baseline/status` | analyst | Learning-window state plus authorization counts |
 | GET | `/api/devices/{mac}/authorization/history` | analyst | Per-device audit trail (newest first) with `limit` query param |
 
 Body schema for approve/reject/revoke (all optional): `{"reason": "..."}` — recorded in the audit row.
@@ -218,6 +222,43 @@ The React frontend includes several additional routes beyond the primary pages d
 | `/rules` | Pattern editor and rule browser (alias for `/patterns`) |
 | `/adapters` | Interface management (alias for `/interfaces`) |
 | `/docs` | Built-in knowledge base with searchable documentation |
+
+### Topology Export and Share Links
+
+The topology page has an **Export SVG** button and a **Share** dropdown.
+
+**Export** renders the current map server-side and downloads it as a
+standalone SVG, so it can be dropped into a report or ticket. The layout is
+deterministic (internet → infrastructure → endpoints) rather than a force
+simulation, so re-exporting an unchanged network produces an identical file.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  https://leetha.lan/api/topology/export.svg -o topology.svg
+```
+
+**Share links** give someone a read-only snapshot without provisioning an
+account:
+
+| Method | Route | Role | Purpose |
+|---|---|---|---|
+| `GET` | `/api/topology/export.svg` | any | Download the current map |
+| `GET` | `/api/topology/share` | any | Report whether a link is active |
+| `POST` | `/api/topology/share` | admin | Mint or rotate the key |
+| `DELETE` | `/api/topology/share` | admin | Revoke the link |
+| `GET` | `/share/{key}/topology.svg` | none | The read-only snapshot |
+
+Security properties worth knowing:
+
+- A share key is **not an API token**. It is stored in its own file as a
+  SHA-256 digest, verified with a constant-time compare, and consulted only by
+  the share endpoint. A leaked link exposes the picture and nothing else.
+- The raw key is returned **once**, at creation. Rotating immediately
+  invalidates any previously issued link.
+- `/share/` is exempt from API authentication by design — the key in the URL
+  *is* the credential. An invalid or revoked key returns `404`, not `403`, so
+  the endpoint does not confirm whether a link ever existed.
+- Device-supplied hostnames are escaped before rendering.
 
 ### API Rate Limiting
 

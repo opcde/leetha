@@ -195,6 +195,12 @@ async def run_sync(list_sources: bool = False, source: str | None = None):
         total_entries = tracker.total_entries
         total_bytes = tracker.total_bytes
 
+    # Drop caches belonging to feeds that no longer exist. Only done on a
+    # full sync -- a single-source run has no view of the whole catalogue.
+    pruned: list[str] = []
+    if not source and failed == 0:
+        pruned = prune_retired_caches(config.cache_dir, registry)
+
     # Summary
     console.print()
     if failed == 0:
@@ -210,7 +216,43 @@ async def run_sync(list_sources: bool = False, source: str | None = None):
             f"[dim]│[/dim]  [bold]{total_entries:,}[/bold] entries  "
             f"[dim]│[/dim]  {_format_bytes(total_bytes)}"
         )
+    if pruned:
+        console.print(
+            f"  [dim]removed {len(pruned)} retired cache file"
+            f"{'s' if len(pruned) > 1 else ''}: {', '.join(sorted(pruned))}[/dim]"
+        )
     console.print()
+
+
+def prune_retired_caches(cache_dir, registry) -> list[str]:
+    """Delete cache files for feeds no longer in the registry.
+
+    Retiring a feed used to leave its cache on disk forever -- harmless for
+    a 12 KB file, but the dropped ``huginn_mac_vendors`` export was over
+    700 MB. Only ``<feed>.json`` files are written here, so anything whose
+    stem is not a live cache name is a leftover.
+
+    Returns the names of the files removed.
+    """
+    live = set()
+    for src in registry.list_sources():
+        live.add(CACHE_NAMES.get(src.name, src.name))
+
+    removed: list[str] = []
+    try:
+        entries = list(cache_dir.glob("*.json"))
+    except OSError:
+        return removed
+
+    for path in entries:
+        if path.stem in live:
+            continue
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError:
+            continue
+    return removed
 
 
 PARSER_MAP = {
@@ -232,7 +274,6 @@ PARSER_MAP = {
     "satori_ssh": "parse_satori",
     "satori_web": "parse_satori",
     "satori_sip": "parse_satori",
-    "satori_ntp": "parse_satori",
     "recog": "parse_recog",
 }
 
@@ -260,6 +301,15 @@ MULTIFILE_MANIFESTS: dict[str, list[str]] = {
         "ntp_banners.xml",
         "sip_banners.xml",
         "mysql_banners.xml",
+        # Protocols leetha already captures but had no Recog coverage for.
+        # telnet_banners.xml declares no "matches" attribute, so it is
+        # keyed by filename via the multifile fallback.
+        "telnet_banners.xml",
+        "mdns_device-info_txt.xml",
+        "dhcp_vendor_class.xml",
+        "sip_user_agents.xml",
+        "ldap_searchresult.xml",
+        "rtsp_servers.xml",
     ],
 }
 
@@ -335,19 +385,38 @@ async def sync_source_with_progress(source_name: str) -> AsyncGenerator[dict, No
             for fname, raw in file_data.items():
                 total_bytes += len(raw)
                 chunk_content = raw.decode("utf-8", errors="ignore")
-                chunk_data = parser_fn(chunk_content)
+                # Derive a per-file key so files that declare no match type
+                # don't all collapse onto the same bucket and overwrite
+                # each other (e.g. recog's telnet_banners.xml).
+                stem = fname.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                try:
+                    chunk_data = parser_fn(chunk_content, fallback_key=stem)
+                except TypeError:
+                    chunk_data = parser_fn(chunk_content)
                 if isinstance(chunk_data, dict):
-                    merged.update(chunk_data)
+                    for key, value in chunk_data.items():
+                        if key in merged and isinstance(value, list):
+                            merged[key].extend(value)
+                        else:
+                            merged[key] = value
 
             cache_name = CACHE_NAMES.get(src.name, src.name)
             cache_file = config.cache_dir / f"{cache_name}.json"
             with open(cache_file, "w") as f:
                 json.dump({"source": src.name, "entries": merged}, f)
 
+            # merged is keyed by match type, each holding a list of
+            # fingerprints. Report the fingerprints -- reporting the 13
+            # keys made a 1,962-signature feed look trivial.
+            entry_count = sum(
+                len(v) if isinstance(v, (list, dict)) else 1
+                for v in merged.values()
+            )
+
             yield {
                 "event": "complete",
                 "source": src.name,
-                "entries": len(merged),
+                "entries": entry_count,
                 "size": total_bytes,
             }
         except Exception as e:

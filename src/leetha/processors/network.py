@@ -156,7 +156,7 @@ class NetworkDiscoveryProcessor(Processor):
                 source="dhcpv6",
                 method="exact",
                 certainty=0.65,
-                raw={"duid": duid},
+                raw={"duid": duid, "duid_type": packet.get("duid_type")},
             ))
 
         return evidence

@@ -59,7 +59,30 @@ _VENDOR_CLASS_KEYWORDS: dict[str, str] = {
     "asus": "ASUS", "linksys": "Linksys", "tp-link": "TP-Link",
     "dlink": "D-Link", "zyxel": "ZyXEL", "mikrotik": "MikroTik",
     "ruckus": "Ruckus", "cambium": "Cambium",
+    # High-frequency vendors that were previously falling through: between
+    # them these account for tens of thousands of otherwise-unattributed
+    # vendor-class strings in the Huginn table.
+    "lexmark": "Lexmark", "huawei": "Huawei", "shelly": "Shelly",
+    "shoretel": "ShoreTel", "axis": "Axis Communications",
+    "tenda": "Tenda", "hewlett packard": "HP", "hewlett-packard": "HP",
+    "kyocera": "Kyocera", "ricoh": "Ricoh", "sharp": "Sharp",
+    "toshiba": "Toshiba", "zebra": "Zebra", "polycom": "Polycom",
+    "yealink": "Yealink", "grandstream": "Grandstream",
+    "hikvision": "Hikvision", "dahua": "Dahua", "amazon": "Amazon",
+    "roku": "Roku", "sonos": "Sonos", "nest": "Nest", "ecobee": "ecobee",
+    "tplink": "TP-Link", "technicolor": "Technicolor",
+    "arris": "Arris", "sagemcom": "Sagemcom", "zte": "ZTE",
+    "siemens": "Siemens", "schneider": "Schneider Electric",
+    "rockwell": "Rockwell Automation", "moxa": "Moxa",
 }
+
+# Self-describing vendor classes used by most network printers and some
+# appliances: "Mfg=Hewlett Packard;Typ=Printer;Mod=HP LaserJet 400;Ser=..."
+# These carry vendor, device type, and model outright -- far better than a
+# keyword guess -- and account for thousands of rows on their own.
+_VC_STRUCTURED_RE = re.compile(
+    r"\b(mfg|typ|mod)\s*=\s*([^;]+)", re.IGNORECASE
+)
 
 
 # ===================================================================
@@ -81,10 +104,41 @@ def _fingerprint_dhcp_opts(raw_options: str) -> str:
     return hashlib.md5(",".join(cleaned).encode()).hexdigest()
 
 
+def _parse_vendor_class_fields(vc_string: str) -> dict[str, str]:
+    """Extract Mfg / Typ / Mod fields from a structured vendor class.
+
+    Returns ``{}`` when the string isn't in the structured form.
+    """
+    if not vc_string or "=" not in vc_string:
+        return {}
+    found = {
+        key.lower(): val.strip()
+        for key, val in _VC_STRUCTURED_RE.findall(vc_string)
+        if val.strip()
+    }
+    if not found:
+        return {}
+    out: dict[str, str] = {}
+    if found.get("mfg"):
+        out["vendor"] = found["mfg"]
+    if found.get("typ"):
+        out["device_type"] = found["typ"]
+    if found.get("mod"):
+        out["model"] = found["mod"]
+    return out
+
+
 def _guess_vendor_from_class(vc_string: str) -> str | None:
-    """Match a DHCP vendor-class string against known keywords."""
+    """Match a DHCP vendor-class string against known keywords.
+
+    A structured ``Mfg=...`` field is authoritative and wins over the
+    keyword table.
+    """
     if not vc_string:
         return None
+    structured = _parse_vendor_class_fields(vc_string)
+    if structured.get("vendor"):
+        return structured["vendor"]
     lower = vc_string.lower()
     for kw, vendor_name in _VENDOR_CLASS_KEYWORDS.items():
         if kw in lower:
@@ -346,9 +400,15 @@ def ingest_huginn_dhcp_vendor(content: str) -> dict:
                 continue
             val = rec.get("value", "")
             row: dict[str, str] = {"value": val}
+            structured = _parse_vendor_class_fields(val)
             guessed = _guess_vendor_from_class(val)
             if guessed:
                 row["vendor_hint"] = guessed
+            # A structured class also names the device type and model.
+            if structured.get("device_type"):
+                row["device_type"] = structured["device_type"]
+            if structured.get("model"):
+                row["model"] = structured["model"]
             table[vid] = row
         log.info("Ingested %d Huginn-Muninn DHCP vendor entries", len(table))
     except Exception as exc:
@@ -473,23 +533,111 @@ def ingest_ja3(content: str) -> dict:
     return _ingest_ja3_csv(content)
 
 
+# Description keywords -> OS family. The Trisul feed carries no explicit
+# "os" field, so without this every synced JA3 hit produced a match with no
+# identity at all. Ordered: the first match wins, so put specific platforms
+# ahead of the generic ones they contain.
+_JA3_OS_HINTS: tuple[tuple[str, str], ...] = (
+    ("android", "Android"),
+    ("iphone", "iOS"), ("ipad", "iOS"), (" ios", "iOS"),
+    ("osx", "macOS"), ("os x", "macOS"), ("macos", "macOS"),
+    ("windows", "Windows"), ("win7", "Windows"), ("win10", "Windows"),
+    ("linux", "Linux"), ("ubuntu", "Linux"), ("debian", "Linux"),
+)
+
+# Entries that describe malware or scanner traffic rather than a device.
+# leetha is a device-discovery and OS-identification tool, not a threat
+# feed, so these are dropped at ingest: they carry no vendor, OS, or device
+# type, and surfacing them would put malware labels in the host inventory.
+_JA3_NON_DEVICE_PREFIXES = ("malware:", "scanner:")
+
+
+def _classify_ja3_description(label: str) -> dict:
+    """Infer OS and device type from a JA3 description.
+
+    Returns ``{"skip": True}`` for records that identify malware or scanner
+    traffic instead of a device.
+    """
+    out: dict = {}
+    if not label:
+        return out
+    lowered = label.lower()
+
+    if lowered.startswith(_JA3_NON_DEVICE_PREFIXES):
+        return {"skip": True}
+
+    for needle, os_name in _JA3_OS_HINTS:
+        if needle in lowered:
+            out["os_family"] = os_name
+            break
+
+    # An Android/iOS app fingerprint means a handset, not a general host.
+    if out.get("os_family") in ("Android", "iOS"):
+        out["device_type"] = "mobile"
+
+    # "JA3S:" entries fingerprint a *server* hello, so they can never match
+    # a client hello -- flag them rather than letting them look like misses.
+    if lowered.startswith("ja3s:"):
+        out["direction"] = "server"
+
+    return out
+
+
+def _ja3_record(item: dict) -> tuple[str, dict] | None:
+    """Normalise one JA3 record into ``(hash, info)``."""
+    if not isinstance(item, dict):
+        return None
+    digest = item.get("ja3_hash") or item.get("md5")
+    if not digest:
+        return None
+    label = item.get("User-Agent") or item.get("desc") or item.get("description") or ""
+    derived = _classify_ja3_description(label)
+    if derived.get("skip"):
+        return None
+    info = {
+        "app": label,
+        "os_family": item.get("os"),
+        "description": label,
+        # Trisul ships the raw JA3 string alongside the digest; keeping it
+        # lets a future matcher fall back to string comparison.
+        "ja3_str": item.get("ja3_str"),
+    }
+    if not info["os_family"]:
+        info["os_family"] = derived.get("os_family")
+    for key in ("device_type", "direction"):
+        if key in derived:
+            info[key] = derived[key]
+    return str(digest).strip(), info
+
+
 def _ingest_ja3_json(content: str) -> dict:
-    """Handle JA3 data in JSON format."""
+    """Handle JA3 data in JSON or JSON-lines format.
+
+    The Trisul feed is newline-delimited JSON (one object per line), which
+    ``json.loads`` on the whole document rejects, so fall back to parsing
+    line by line.
+    """
     table: dict[str, dict] = {}
     try:
         blob = json.loads(content)
-        if isinstance(blob, list):
-            for item in blob:
-                h = item.get("ja3_hash") or item.get("md5")
-                if h:
-                    table[h] = {
-                        "app": item.get("User-Agent") or item.get("desc", ""),
-                        "os_family": item.get("os"),
-                        "description": item.get("desc", ""),
-                    }
-        log.info("Ingested %d JA3 fingerprints from JSON", len(table))
-    except Exception as exc:
-        log.error("JA3 JSON ingestion failed: %s", exc)
+        items = blob if isinstance(blob, list) else [blob]
+    except json.JSONDecodeError:
+        items = []
+        for raw in content.splitlines():
+            line = raw.strip().rstrip(",")
+            if not line or line in ("[", "]"):
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    for item in items:
+        rec = _ja3_record(item)
+        if rec:
+            table[rec[0]] = rec[1]
+
+    log.info("Ingested %d JA3 fingerprints from JSON", len(table))
     return table
 
 
@@ -507,11 +655,18 @@ def _ingest_ja3_csv(content: str) -> dict:
             digest = ln[:sep].strip()
             apps_str = ln[sep + 1:].strip().strip('"')
             if digest and len(digest) == 32:
-                table[digest] = {
+                rec = {
                     "app": apps_str,
                     "os_family": None,
                     "description": apps_str,
                 }
+                # Same enrichment the JSON path gets, so an alternate
+                # CSV source still yields OS and device-type inference.
+                derived = _classify_ja3_description(apps_str)
+                if derived.pop("skip", False):
+                    continue
+                rec.update(derived)
+                table[digest] = rec
         log.info("Ingested %d JA3 fingerprints from CSV", len(table))
     except Exception as exc:
         log.error("JA3 CSV ingestion failed: %s", exc)
@@ -650,7 +805,7 @@ parse_satori = ingest_satori
 # Rapid7 Recog fingerprint parser (one XML file per banner/header type)
 # ===================================================================
 
-def ingest_recog(content: str) -> dict:
+def ingest_recog(content: str, fallback_key: str | None = None) -> dict:
     """Parse one Rapid7 Recog XML fingerprint file.
 
     Returns ``{match_type: [fingerprint, ...]}`` keyed by the file's
@@ -659,6 +814,11 @@ def ingest_recog(content: str) -> dict:
     are the ``<param pos name value>`` extractions (``value`` is None for
     capture-group extractions resolved at match time). The multifile sync
     merges files by their (distinct) match type.
+
+    A few upstream files (telnet_banners.xml) omit ``matches`` entirely.
+    Those fall back to *fallback_key* -- normally derived from the filename
+    -- because keying them all as "unknown" made any two such files
+    silently overwrite each other during the merge.
     """
     import xml.etree.ElementTree as ET
 
@@ -669,7 +829,7 @@ def ingest_recog(content: str) -> dict:
         log.warning("Recog XML parse failed: %s", exc)
         return out
 
-    match_type = root.get("matches") or "unknown"
+    match_type = root.get("matches") or fallback_key or "unknown"
     fps: list[dict] = []
     for fp in root.findall("fingerprint"):
         pattern = fp.get("pattern")

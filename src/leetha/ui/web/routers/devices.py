@@ -108,6 +108,7 @@ async def api_devices(
     location: str | None = None,
     tag: str | None = None,
     authorization: str | None = None,
+    discovery_context: str | None = None,
     is_online: bool | None = None,
     raw: bool = False,
 ):
@@ -122,7 +123,8 @@ async def api_devices(
         os_family=os_family, alert_status=alert_status,
         interface=interface, confidence_min=confidence_min,
         criticality=criticality, owner=owner, location=location, tag=tag,
-        authorization=authorization, is_online=is_online,
+        authorization=authorization, discovery_context=discovery_context,
+        is_online=is_online,
     )
 
     # Sanitize hostnames and reject vendor-mismatched forwarded mDNS names
@@ -413,14 +415,6 @@ async def get_device_authorization_history(mac: str, limit: int = 100):
     return {"mac": mac, "history": history}
 
 
-@router.post("/api/baseline/set")
-async def baseline_set_endpoint(body: AuthorizationBody, request: Request):
-    """Bulk-approve every currently unapproved device."""
-    app_instance = _get_app()
-    touched = await app_instance.db.baseline_set(actor="baseline")
-    return {"touched": touched}
-
-
 @router.post("/api/baseline/reset")
 async def baseline_reset_endpoint(body: AuthorizationBody, request: Request):
     """Return every device to 'unapproved' (audit-logged)."""
@@ -431,9 +425,78 @@ async def baseline_reset_endpoint(body: AuthorizationBody, request: Request):
 
 @router.get("/api/baseline/status")
 async def baseline_status_endpoint():
+    """Learning-window state plus the authorization counts.
+
+    `learning` is what drives alert severity now; the authorization counts are
+    retained because they still describe how much of the inventory a human has
+    actually vouched for.
+    """
+    from datetime import datetime, timezone
+
     app_instance = _get_app()
     status = await app_instance.db.baseline_status()
+    state = await app_instance.db.get_sensor_state()
+
+    def _parse(raw):
+        try:
+            return datetime.fromisoformat(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    now = datetime.now(timezone.utc)
+    last_discovery = _parse(state["last_discovery_at"])
+    async with app_instance.db.db.execute(
+        "SELECT COUNT(*) FROM devices"
+    ) as cur:
+        devices_found = (await cur.fetchone())[0]
+
+    status.update({
+        "learning": state["window_closed_at"] is None,
+        "first_capture_at": state["first_capture_at"],
+        "window_closed_at": state["window_closed_at"],
+        "devices_found": devices_found,
+        "quiet_for_seconds": (
+            int((now - last_discovery).total_seconds()) if last_discovery else None
+        ),
+        "learning_mode": getattr(
+            app_instance.config, "baseline_learning_mode", "automatic"),
+    })
     return status
+
+
+@router.post("/api/baseline/finish")
+async def baseline_finish_endpoint(request: Request):
+    """Close the learning window now: "I am done inventorying".
+
+    This is the honest replacement for the old bulk-approve button. It is a
+    policy action and touches no device rows -- it does not claim a human
+    verified anything.
+    """
+    app_instance = _get_app()
+    await app_instance.db.close_learning_window()
+    state = await app_instance.db.get_sensor_state()
+    return {"learning": False, "window_closed_at": state["window_closed_at"]}
+
+
+@router.post("/api/baseline/restart-learning")
+async def baseline_restart_learning_endpoint(request: Request):
+    """Re-enter learning, e.g. after moving the sensor to another network."""
+    app_instance = _get_app()
+    await app_instance.db.reopen_learning_window()
+    return {"learning": True}
+
+
+@router.post("/api/baseline/clear-attestations")
+async def baseline_clear_attestations_endpoint(request: Request):
+    """Revert approvals that came from the old bulk `baseline set`.
+
+    Those rows claim a human verified a device when nobody looked. Approval no
+    longer affects alerting, so clearing them costs nothing and leaves the
+    audit trail honest. Hand-approvals are left alone.
+    """
+    app_instance = _get_app()
+    reverted = await app_instance.db.clear_baseline_attestations()
+    return {"reverted": reverted}
 
 
 @router.get("/api/devices/{mac}")

@@ -537,6 +537,11 @@ class Pipeline:
                 opt55=data.get("opt55"),
                 opt60=data.get("opt60"),
             ))
+            opt60 = data.get("opt60")
+            if opt60:
+                m = self._lookup.match_recog("dhcp_vendor_class", opt60)
+                if m:
+                    hits.append(m)
             # Satori annotated DHCP fingerprints (device attribution)
             opt55 = data.get("opt55")
             if opt55:
@@ -555,6 +560,31 @@ class Pipeline:
                 vendor_class=data.get("vendor_class"),
                 enterprise_id=data.get("enterprise_id"),
             ))
+            # A DUID-LLT/LL embeds the client's link-layer address. When it
+            # differs from the frame's source MAC the host is speaking
+            # through a different interface (or behind a relay), so the
+            # embedded MAC is an extra, independent vendor signal.
+            duid_mac = data.get("duid_mac")
+            if duid_mac and duid_mac.lower() != (packet.hw_addr or "").lower():
+                for m in self._lookup.match_mac(duid_mac):
+                    if m.source == "oui":
+                        m.raw_data = {**(m.raw_data or {}), "from": "dhcpv6_duid"}
+                        hits.append(m)
+
+        elif protocol == "icmpv6":
+            # A Router Advertisement's hop limit and M/O flags fingerprint
+            # the router's stack. Without this the pipeline only learns
+            # that a device *is* a gateway, never which vendor it is.
+            if data.get("icmpv6_type") == "router_advertisement":
+                m = self._lookup.match_icmpv6(
+                    icmpv6_type="router_advertisement",
+                    hop_limit=data.get("hop_limit"),
+                    managed=data.get("managed"),
+                    other=data.get("other"),
+                    options={},
+                )
+                if m:
+                    hits.append(m)
 
         elif protocol == "mdns":
             hits.extend(self._lookup.match_mdns_service(
@@ -562,6 +592,18 @@ class Pipeline:
                 name=data.get("name"),
                 packet_data=data,
             ))
+            # Recog's mdns.device-info.txt patterns match the raw "key=value"
+            # TXT strings (osxvers=22, model=MacBookPro18,1); leetha keeps
+            # them parsed into a dict, so rebuild each pair to match.
+            txt_records = data.get("txt_records") or {}
+            if isinstance(txt_records, dict):
+                for key, value in txt_records.items():
+                    m = self._lookup.match_recog(
+                        "mdns_device_info", f"{key}={value}"
+                    )
+                    if m:
+                        hits.append(m)
+                        break
 
         elif protocol == "ssdp":
             m = self._lookup.match_ssdp_server(
@@ -582,15 +624,26 @@ class Pipeline:
                     hits.append(m)
 
         elif protocol == "tcp_syn":
+            tcp_flags = data.get("tcp_flags", "S")
             ttl = data.get("ttl", 0)
             if ttl:
                 m = self._lookup.match_ttl(ttl)
                 if m:
                     hits.append(m)
-            sig = f"{data.get('ttl', 0)}:{data.get('window_size', 0)}:{data.get('mss', '*')}:{data.get('tcp_options', '')}"
-            m = self._lookup.match_tcp_signature(sig)
-            if m:
-                hits.append(m)
+            # p0f's tables here are client-request signatures, so only feed
+            # them pure SYNs -- a SYN-ACK would match the wrong stack.
+            if tcp_flags == "S":
+                sig = f"{data.get('ttl', 0)}:{data.get('window_size', 0)}:{data.get('mss', '*')}:{data.get('tcp_options', '')}"
+                m = self._lookup.match_tcp_signature(sig)
+                if m:
+                    hits.append(m)
+            # Satori indexes both directions, and its ICS/PLC coverage is
+            # entirely SYN-ACK.
+            satori_sig = data.get("satori_sig")
+            if satori_sig:
+                m = self._lookup.match_satori_tcp(satori_sig, tcp_flags)
+                if m:
+                    hits.append(m)
 
         elif protocol == "dns":
             qname = data.get("query_name", "")
@@ -625,6 +678,43 @@ class Pipeline:
                     m = self._lookup.match_satori_web(server)
                     if m:
                         hits.append(m)
+                elif service == "sip":
+                    # The SIP matcher pulls the Server header into
+                    # "software" -- that is exactly Satori's sipserver key.
+                    sip_server = data.get("software") or banner
+                    m = self._lookup.match_satori_sip(sip_server)
+                    if m:
+                        hits.append(m)
+                    # Recog splits SIP across Server and User-Agent headers.
+                    for kind in ("sip", "sip_user_agent"):
+                        m = self._lookup.match_recog(kind, sip_server)
+                        if m:
+                            hits.append(m)
+                            break
+                elif service in ("telnet", "rtsp", "ldap"):
+                    # Recog covers these directly; leetha previously had
+                    # only its built-in regex matchers for them. LDAP
+                    # matches the decoded response bytes, not the hex
+                    # summary shown as the banner.
+                    text = data.get("ldap_response") if service == "ldap" else banner
+                    m = self._lookup.match_recog(service, text or banner)
+                    if m:
+                        hits.append(m)
+                elif service == "smb":
+                    # Native OS / LAN Manager strings from an SMB1 Session
+                    # Setup. Satori and Recog both key off these.
+                    for native in (data.get("native_os"), data.get("native_lanman")):
+                        if not native:
+                            continue
+                        m = self._lookup.match_satori_smb(native)
+                        if m:
+                            hits.append(m)
+                            break
+                    native_os = data.get("native_os")
+                    if native_os:
+                        m = self._lookup.match_recog("smb", native_os)
+                        if m:
+                            hits.append(m)
 
         elif protocol == "tls":
             ja3 = data.get("ja3_hash")

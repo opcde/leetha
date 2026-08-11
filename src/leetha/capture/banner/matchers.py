@@ -100,13 +100,70 @@ def _match_pop3(payload: bytes) -> dict | None:
     return result
 
 
+def _strip_telnet_iac(payload: bytes) -> bytes:
+    """Drop IAC negotiation sequences, leaving the human-readable banner.
+
+    IAC (0xff) is followed by a command; WILL/WONT/DO/DONT (251-254) take a
+    further option byte, and subnegotiation (250) runs until IAC SE (240).
+    """
+    out = bytearray()
+    i = 0
+    n = len(payload)
+    while i < n:
+        if payload[i] != 0xFF:
+            out.append(payload[i])
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        cmd = payload[i + 1]
+        if cmd == 0xFA:  # SB ... IAC SE
+            j = i + 2
+            while j + 1 < n and not (payload[j] == 0xFF and payload[j + 1] == 0xF0):
+                j += 1
+            i = j + 2
+        elif 0xFB <= cmd <= 0xFE:  # WILL / WONT / DO / DONT + option
+            i += 3
+        else:
+            i += 2
+    return bytes(out)
+
+
+# Greetings that belong to other protocols. Without IAC negotiation to
+# confirm telnet, a payload opening this way is some other service sharing
+# the port and must not be claimed as a telnet banner.
+_FOREIGN_GREETING_RE = re.compile(
+    r"^(?:SSH-|HTTP/|RTSP/|SIP/|RFB\s|\+OK|\*\s+OK|\d{3}[ -])",
+    re.IGNORECASE,
+)
+
+_TELNET_PROMPT_RE = re.compile(
+    r"(?:login|username|user name|password)\s*:\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _match_telnet(payload: bytes) -> dict | None:
-    if payload[:2] in (b"\xff\xfb", b"\xff\xfd"):
-        return {"service": "telnet", "raw_banner": payload.hex()}
-    text = payload.decode("ascii", errors="replace").lower()
-    if "login:" in text:
-        return {"service": "telnet", "raw_banner": text.strip()}
-    return None
+    """Extract a telnet login banner.
+
+    The banner keeps its original case and line structure: Recog's telnet
+    patterns are case-sensitive and anchored across whole login screens,
+    and this text is what the UI displays.
+    """
+    had_iac = payload[:1] == b"\xff"
+    text = _strip_telnet_iac(payload).decode("ascii", errors="replace")
+    # Drop replacement characters left by any residual binary.
+    cleaned = text.replace("�", "").strip()
+
+    if not had_iac:
+        # No negotiation to prove this is telnet -- require a login prompt
+        # and reject anything opening with another protocol's greeting.
+        if _FOREIGN_GREETING_RE.match(cleaned):
+            return None
+        if not _TELNET_PROMPT_RE.search(cleaned):
+            return None
+
+    return {"service": "telnet", "raw_banner": cleaned}
 
 
 def _match_vnc(payload: bytes) -> dict | None:
@@ -221,6 +278,104 @@ def _match_redis(payload: bytes) -> dict | None:
     return result
 
 
+# SMB1 command byte for Session Setup AndX -- the only exchange that
+# carries the server's Native OS / Native LAN Manager strings.
+_SMB_COM_SESSION_SETUP_ANDX = 0x73
+
+
+def _utf16_strings(blob: bytes) -> list[str]:
+    """Split a UTF-16LE block on 2-byte-aligned null terminators."""
+    out: list[str] = []
+    unit_count = len(blob) // 2
+    start = 0
+    for i in range(unit_count):
+        if blob[2 * i:2 * i + 2] == b"\x00\x00":
+            text = blob[start:2 * i].decode("utf-16-le", errors="ignore").strip()
+            if text:
+                out.append(text)
+            start = 2 * (i + 1)
+    if start < len(blob) - 1:
+        text = blob[start:unit_count * 2].decode("utf-16-le", errors="ignore").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _looks_like_text(values: list[str]) -> bool:
+    """True when every string is plausible printable device text."""
+    if not values:
+        return False
+    return all(
+        v and all(c == " " or c.isprintable() and ord(c) < 0x2000 for c in v)
+        for v in values
+    )
+
+
+def _smb_strings(blob: bytes, unicode_strings: bool) -> list[str]:
+    """Split the SMB data block into its null-terminated strings."""
+    if not unicode_strings:
+        return [
+            text for text in (
+                chunk.decode("latin-1", errors="ignore").strip()
+                for chunk in blob.split(b"\x00")
+            ) if text
+        ]
+
+    # SMB1 pads Unicode strings to a 2-byte boundary measured from the SMB
+    # header, which we don't track exactly. Decode at both alignments and
+    # keep whichever yields sane text -- a one-byte slip turns "Windows"
+    # into CJK noise, so this is unambiguous in practice.
+    aligned = _utf16_strings(blob)
+    if _looks_like_text(aligned):
+        return aligned
+    shifted = _utf16_strings(blob[1:])
+    if _looks_like_text(shifted):
+        return shifted
+    return aligned or shifted
+
+
+def _parse_smb1_session_setup(payload: bytes) -> tuple[str | None, str | None]:
+    """Pull (native_os, native_lanman) from an SMB1 Session Setup AndX response.
+
+    Layout after the 4-byte NetBIOS header: a 32-byte SMB header, a
+    WordCount byte, ``WordCount * 2`` parameter bytes, a 2-byte ByteCount,
+    then the data block. For an extended-security response (WordCount 4)
+    the data block opens with a security blob that has to be skipped;
+    the classic response (WordCount 3) starts at Native OS directly.
+    """
+    # 4 NetBIOS + 32 SMB header + 1 WordCount
+    if len(payload) < 37:
+        return (None, None)
+
+    flags2 = int.from_bytes(payload[14:16], "little")
+    unicode_strings = bool(flags2 & 0x8000)
+
+    word_count = payload[36]
+    params_start = 37
+    byte_count_off = params_start + word_count * 2
+    if len(payload) < byte_count_off + 2:
+        return (None, None)
+
+    data_start = byte_count_off + 2
+    byte_count = int.from_bytes(payload[byte_count_off:byte_count_off + 2], "little")
+    data = payload[data_start:data_start + byte_count] if byte_count else payload[data_start:]
+    if not data:
+        return (None, None)
+
+    if word_count == 4:
+        # Params: AndXCommand, AndXReserved, AndXOffset(2), Action(2),
+        # SecurityBlobLength(2) -- skip the blob to reach the strings.
+        blob_len = int.from_bytes(payload[params_start + 6:params_start + 8], "little")
+        data = data[blob_len:]
+    elif word_count != 3:
+        return (None, None)
+
+    strings = _smb_strings(data, unicode_strings)
+    native_os = strings[0] if strings else None
+    native_lanman = strings[1] if len(strings) > 1 else None
+    return (native_os, native_lanman)
+
+
 def _match_smb(payload: bytes) -> dict | None:
     # NetBIOS session header is 4 bytes, then SMB magic
     if len(payload) < 8:
@@ -232,11 +387,23 @@ def _match_smb(payload: bytes) -> dict | None:
         smb_ver = "1"
     else:
         return None
-    return {
+
+    result = {
         "service": "smb",
         "smb_version": smb_ver,
         "raw_banner": payload[:32].hex(),
     }
+
+    # SMB2 dropped these fields; only SMB1 Session Setup carries them.
+    if smb_ver == "1" and len(payload) > 8 and payload[8] == _SMB_COM_SESSION_SETUP_ANDX:
+        native_os, native_lanman = _parse_smb1_session_setup(payload)
+        if native_os:
+            result["native_os"] = native_os
+            result["raw_banner"] = native_os
+        if native_lanman:
+            result["native_lanman"] = native_lanman
+
+    return result
 
 
 def _match_rdp(payload: bytes) -> dict | None:
@@ -319,7 +486,15 @@ def _match_ldap(payload: bytes) -> dict | None:
             break
     if not found:
         return None
-    return {"service": "ldap", "raw_banner": payload[:16].hex()}
+    # raw_banner stays hex for display, but Recog's ldap.search_result
+    # patterns match the response bytes as latin-1 text (vendorName,
+    # domainControllerFunctionality, ...), so expose that separately
+    # instead of a 16-byte hex prefix nothing can match against.
+    return {
+        "service": "ldap",
+        "raw_banner": payload[:16].hex(),
+        "ldap_response": payload.decode("latin-1", errors="replace"),
+    }
 
 
 def _match_cassandra(payload: bytes) -> dict | None:

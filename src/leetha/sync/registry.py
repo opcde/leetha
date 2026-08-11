@@ -154,23 +154,33 @@ def _build_default_feeds() -> list[FeedSource]:
         FeedSource(
             key="ja3_fingerprints",
             title="JA3 TLS Fingerprints",
-            endpoint="https://raw.githubusercontent.com/salesforce/ja3/master/lists/osx-nix-ja3.csv",
-            kind="csv",
+            # Was salesforce/ja3 lists/osx-nix-ja3.csv, but that repo is
+            # archived and the list only covered 157 macOS/Linux desktop
+            # apps. Trisul's set is actively maintained and a near-superset:
+            # it carries 155 of those 157 hashes plus mobile-app, browser,
+            # and malware fingerprints, for 609 total.
+            endpoint="https://raw.githubusercontent.com/trisulnsm/trisul-scripts/master/lua/frontend_scripts/reassembly/ja3/prints/ja3fingerprint.json",
+            kind="json",
             summary=(
-                "Salesforce JA3 TLS Client Hello fingerprint database"
-                " (archived -- OSX/Linux application fingerprints)"
+                "Trisul JA3 TLS Client Hello fingerprints -- browsers,"
+                " mobile apps, desktop clients, and malware families"
+                " (609 entries)"
             ),
         ),
         FeedSource(
             key="ja4_fingerprints",
             title="JA4 TLS Fingerprints",
-            # ja4db.com/api/read/ went offline (host stopped accepting
-            # connections); use FoxIO's GitHub-hosted CSV mirror instead.
+            # The full JA4 database moved from ja4db.com/api/read/ to
+            # ja4db.foxio.io/api/ja4/, which now returns 403 without an
+            # account. This GitHub-hosted CSV is the only unauthenticated
+            # JA4 source FoxIO publishes, so coverage is limited to the
+            # ~70 mappings it contains.
             endpoint="https://raw.githubusercontent.com/FoxIO-LLC/ja4/main/ja4plus-mapping.csv",
             kind="csv",
             summary=(
-                "FoxIO JA4+ fingerprint database for TLS"
-                " identification (ja4plus-mapping.csv)"
+                "FoxIO JA4+ fingerprint mappings for TLS identification"
+                " (ja4plus-mapping.csv -- the full JA4DB now requires an"
+                " account)"
             ),
         ),
         # Satori fingerprints -- annotated device fingerprints from Huginn-Muninn
@@ -223,13 +233,13 @@ def _build_default_feeds() -> list[FeedSource]:
             kind="json",
             summary="Satori SIP User-Agent fingerprints for VoIP phones (25 entries)",
         ),
-        FeedSource(
-            key="satori_ntp",
-            title="Satori NTP Fingerprints",
-            endpoint="https://raw.githubusercontent.com/Ringmast4r/Huginn-Muninn/main/Satori_Fingerprints/json/ntp.json",
-            kind="json",
-            summary="Satori NTP client fingerprints (25 entries)",
-        ),
+        # NOTE: satori_ntp was removed -- its lookup key encodes Satori's
+        # own timestamp heuristics ("set"/"unset", "current"/"random"),
+        # whose thresholds are undocumented, and the field count is
+        # inconsistent (7 vs 8). The key can't be reconstructed from an
+        # observed NTP header, so the feed could never match. Its 25
+        # identities (Android, Apple iOS, Cisco AP/Router) are already
+        # covered more reliably by DHCP, mDNS, OUI, and TCP fingerprints.
         FeedSource(
             key="recog",
             title="Rapid7 Recog Fingerprints",
@@ -238,7 +248,8 @@ def _build_default_feeds() -> list[FeedSource]:
             summary=(
                 "Rapid7 Recog banner/header fingerprints (SSH, HTTP Server,"
                 " FTP, SMTP, POP/IMAP, SNMP sysDescr, SMB native OS, NTP, SIP,"
-                " MySQL) for passive service, OS, and device identification"
+                " MySQL, Telnet, RTSP, LDAP, mDNS device-info, DHCP vendor"
+                " class) for passive service, OS, and device identification"
             ),
         ),
     ]

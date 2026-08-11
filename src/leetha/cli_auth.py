@@ -7,7 +7,7 @@ from rich.table import Table
 
 from leetha.auth.tokens import (
     generate_token, hash_token,
-    save_admin_token, load_admin_token,
+    save_admin_token, load_admin_token, TokenWriteError,
 )
 from leetha.config import get_config
 from leetha.store.database import Database
@@ -51,7 +51,11 @@ async def _reset_token() -> None:
         await db.revoke_all_admin_tokens()
         raw = generate_token()
         await db.create_auth_token(hash_token(raw), role="admin", label="cli-reset")
-        save_admin_token(raw)
+        try:
+            save_admin_token(raw)
+        except TokenWriteError as exc:
+            console.print(f"[bold red]{exc}[/bold red]")
+            return
         console.print("[bold green]Admin token regenerated:[/bold green]")
         console.print(f"[bold yellow]{raw}[/bold yellow]")
         console.print("[dim]Saved to ~/.leetha/admin-token[/dim]")

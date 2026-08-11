@@ -2,7 +2,7 @@
 
 Leetha's core identification is **passive** — it only knows about devices whose traffic it has seen. But sometimes you want to pre-populate the inventory with devices that *should* be there, even if they haven't sent a packet yet. The **inventory subsystem** (`src/leetha/inventory/`) is a pluggable importer framework for exactly that — DHCP lease files, router tables, UniFi controllers, Pi-hole logs, etc.
 
-The first importer shipped with leetha reads DHCP lease files (ISC dhcpd and dnsmasq formats).
+Four importers ship with leetha: DHCP lease files, Proxmox VE, Zigbee2MQTT, and Z-Wave JS UI.
 
 ---
 
@@ -178,6 +178,107 @@ Max upload size 5 MB. Binary/malformed content parses to `imported: 0` (not 500)
 
 ---
 
+## Built-in: Proxmox VE Importer
+
+Located at `src/leetha/inventory/importers/proxmox.py`.
+
+Passive capture can tell that a MAC belongs to a virtual machine, but not
+*which* guest it is or which hypervisor runs it. Proxmox stores each guest's
+NIC MAC in its config, so importing it lets captured traffic be attributed to
+a named VM or container on a named node.
+
+Needs only a **read-only API token** (`PVEAuditor` role) — the importer never
+writes to Proxmox.
+
+**Config schema:**
+
+| Field | Type | Required | Default | Purpose |
+|---|---|---|---|---|
+| `host` | `string` | yes | — | Proxmox host or IP |
+| `port` | `int` | no | `8006` | API port |
+| `token_id` | `string` | yes | — | e.g. `leetha@pve!inventory` |
+| `token_secret` | `secret` | yes | — | Token secret (stored in the AES-GCM credential store) |
+| `verify_tls` | `bool` | no | `false` | Proxmox ships a self-signed certificate |
+| `include_stopped` | `bool` | no | `true` | Import guests that are not running |
+
+**What it imports:** cluster nodes, QEMU VMs, and LXC containers. Both config
+dialects are handled — QEMU's `net0: virtio=<mac>,...` and LXC's
+`net0: name=eth0,hwaddr=<mac>,...`. Guests with no NIC are skipped, since
+there is nothing to correlate captured traffic against.
+
+**Metadata attached:** `proxmox_node`, `vmid`, `guest_type` (`vm` / `container`),
+`status`, `cores`, `memory_mb`. Records are emitted at certainty `0.90`.
+
+Creating the token in Proxmox:
+
+```bash
+pveum user add leetha@pve
+pveum aclmod / --users leetha@pve --roles PVEAuditor
+pveum user token add leetha@pve inventory --privsep 0
+```
+
+---
+
+## Built-in: Zigbee2MQTT and Z-Wave JS Importers
+
+Located at `src/leetha/inventory/importers/mqtt_smarthome.py`.
+
+Zigbee and Z-Wave devices never touch IP, so **passive capture cannot see them
+at all** — a bulb or a door sensor is invisible no matter how long leetha
+listens. Their controllers already publish a complete device list over MQTT,
+so importing it is the only way these devices enter the inventory.
+
+Both importers read a **retained** message, so no request/response round trip
+is needed — subscribing is enough.
+
+**Config schema (both):**
+
+| Field | Type | Required | Default | Purpose |
+|---|---|---|---|---|
+| `broker` | `string` | yes | — | MQTT broker host or IP |
+| `port` | `int` | no | `1883` | Broker port |
+| `base_topic` | `string` | no | `zigbee2mqtt` / `zwavejs2mqtt` | Base topic |
+| `username` | `string` | no | — | If the broker requires auth |
+| `password` | `secret` | no | — | If the broker requires auth |
+| `timeout` | `int` | no | `15` | Seconds to wait for the retained list |
+
+Z-Wave adds one field:
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `home_id` | `string` | no | Keeps node identifiers unique per controller |
+
+### How devices are keyed
+
+**Zigbee** devices are keyed by their EUI-64, normalised to colon-separated
+octets. The top three octets of an EUI-64 are a **real IEEE OUI**, so imported
+Zigbee devices resolve a vendor through the normal OUI lookup with no extra
+work:
+
+```
+00:17:88:01:0b:2c:3d:4e  ->  Philips Hue / iot_hub
+00:12:4b:00:21:f8:ab:12  ->  Texas Instruments / iot
+```
+
+**Z-Wave** has no equivalent address, and node IDs are only unique within a
+controller, so nodes are keyed `zwave:<home_id>:<node_id>`.
+
+Coordinators (Zigbee) and controller nodes (Z-Wave) are skipped — they are the
+radio, not a discovered device.
+
+**Metadata attached:** `protocol`, `vendor`, `model`, `device_role`
+(`router` / `end_device`), plus `power_source` and `network_address` for
+Zigbee, and `node_id`, `home_id`, `status`, `location` for Z-Wave. Records are
+emitted at certainty `0.95` — the controller is authoritative about its own
+paired devices.
+
+### Requirements
+
+Needs the `aiomqtt` package, which ships as a leetha dependency. If it cannot
+be loaded the importer logs the reason and no-ops rather than raising.
+
+---
+
 ## Writing a New Importer
 
 1. Create `src/leetha/inventory/importers/my_source.py`.
@@ -194,6 +295,6 @@ The scheduler will pick up any enabled `importer_config` row whose `name` matche
 
 ## Role Enforcement
 
-`POST /api/inventory/*` is **admin-only**. Imports can flood the device inventory, which affects `new_host` alerting posture when combined with `baseline set` — delegating to analyst tokens would be a privilege-escalation risk.
+`POST /api/inventory/*` is **admin-only**. Imports can flood the device inventory, which affects `new_host` alerting posture and the learning window — delegating to analyst tokens would be a privilege-escalation risk.
 
 Analysts can still *see* imported devices via the normal `GET /api/devices` endpoint.

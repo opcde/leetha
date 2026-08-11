@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 from rich.console import Console
@@ -14,6 +15,7 @@ from leetha.store.database import Database
 from leetha.store.store import Store
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 async def run_import(args) -> None:
@@ -73,22 +75,28 @@ async def run_import(args) -> None:
             # Drain the queue through the pipeline so every device
             # gets a host record, sighting, and verdict.
             processed = 0
+            failed = 0
             while not packet_queue.empty():
                 pkt = packet_queue.get_nowait()
                 try:
                     await pipeline.process(pkt)
                     processed += 1
                 except Exception:
-                    pass
+                    failed += 1
+                    logger.warning(
+                        "Pipeline failed for %s packet", pkt.protocol, exc_info=True
+                    )
 
             # Summary
             table = Table(title=f"Import Complete: {filepath.name}")
             table.add_column("Metric", style="cyan")
             table.add_column("Value", style="green")
             table.add_row("Packets parsed", str(result.processed))
-            table.add_row("Devices processed", str(processed))
+            table.add_row("Packets fingerprinted", str(processed))
             table.add_row("Total packets", str(result.total_packets))
             table.add_row("Parse errors", str(result.errors))
+            if failed:
+                table.add_row("Pipeline errors", str(failed))
             console.print(table)
 
         host_count = await store.hosts.count()

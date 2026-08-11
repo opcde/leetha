@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from leetha.store.database import Database
-from leetha.store.models import Device, Host, FindingRule
+from leetha.store.models import Device, Host, FindingRule, AlertSeverity
 from leetha.evidence.models import Verdict
 from leetha.rules.discovery import NewHostRule
 
@@ -62,7 +62,7 @@ async def test_passively_observed_never_flips_back_to_false(db):
 
 
 @pytest.mark.asyncio
-async def test_new_host_rule_suppressed_when_not_passively_observed(tmp_path):
+async def test_new_host_rule_graded_info_when_not_passively_observed(tmp_path):
     from leetha.store.store import Store
     db_path = tmp_path / "p.db"
     db = Database(db_path)
@@ -83,7 +83,11 @@ async def test_new_host_rule_suppressed_when_not_passively_observed(tmp_path):
             certainty=80, evidence_chain=[], computed_at=_now(),
         )
         finding = await NewHostRule().evaluate(host, verdict, store)
-        assert finding is None  # suppressed
+        # Graded down, not suppressed. The learning window is a severity layer
+        # and never gates the data path, so an importer-sourced device still
+        # produces a finding -- just a quiet one.
+        assert finding is not None
+        assert finding.severity == AlertSeverity.INFO
     finally:
         await store.close()
         await db.close()

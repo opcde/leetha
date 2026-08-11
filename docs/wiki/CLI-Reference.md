@@ -137,17 +137,29 @@ flag records a custom actor string (defaults to `cli`). See
 [Device Authorization](Device-Authorization.md) for how these states change
 `new_host` finding severity.
 
-### `baseline` -- Bulk Authorization
+### `baseline` -- Learning Window
 
 ```bash
-leetha baseline status    # approved / unapproved / rejected counts
-leetha baseline set       # approve every currently-unapproved device
-leetha baseline reset     # revoke every non-unapproved device back to unapproved
+leetha baseline status              # learning state + authorization counts
+leetha baseline finish              # stop learning now, start alerting
+leetha baseline restart             # re-enter learning (e.g. a new network)
+leetha baseline reset               # revoke every device back to unapproved
+leetha baseline clear-attestations  # undo approvals from the removed bulk command
 ```
 
-`baseline set` is the primary workflow for silencing a pre-existing network:
-after deploying leetha on a network that's already running, run it once and
-future `new_host` findings only fire for genuinely new devices.
+You normally do not need any of these. Leetha stays quiet while it is still
+learning the network and starts escalating once device discovery goes quiet,
+so a freshly-deployed sensor does not alert on the hosts that were already
+there.
+
+`baseline finish` is for when you know the inventory is complete and would
+rather not wait for the quiet period. It is a policy action: it changes
+alerting posture and touches no device records.
+
+> **Removed:** `leetha baseline set` bulk-approved every device. Approval means
+> *"I know this device and leetha's fingerprint of it is accurate"* -- a human
+> attestation -- and applying it to hundreds of unreviewed devices recorded
+> something untrue. Alert noise is handled by the learning window instead.
 
 ### `dhcp-leases` -- DHCP Lease File Importer
 

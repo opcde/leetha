@@ -1,5 +1,6 @@
 """Discovery-related finding rules."""
 from __future__ import annotations
+import logging
 from datetime import datetime, timedelta, timezone
 from leetha.rules.registry import register_rule
 from leetha.rules.base import FindingRule as RuleBase
@@ -9,11 +10,7 @@ from leetha.evidence.models import Verdict
 _LOW_CERT_LAST_FIRED: dict[str, datetime] = {}
 _LOW_CERT_COOLDOWN = timedelta(hours=1)
 
-_AUTH_SEVERITY = {
-    "approved": AlertSeverity.INFO,
-    "unapproved": AlertSeverity.WARNING,
-    "rejected": AlertSeverity.CRITICAL,
-}
+logger = logging.getLogger(__name__)
 
 
 async def _device_authorization(store, mac: str) -> str:
@@ -44,22 +41,27 @@ async def _device_passively_observed(store, mac: str) -> bool:
     return bool(row[0])
 
 
-async def _baseline_established(store) -> bool:
-    """True once the operator has curated the inventory at all.
+async def _device_discovery_context(store, mac: str) -> str:
+    """Return the sensor's learning state when this device was discovered.
 
-    Until at least one device has been explicitly approved or rejected,
-    *every* device is 'unapproved' simply because no baseline exists yet —
-    so a new unapproved device is just inventory (INFO), not a WARNING.
-    Once the operator has started approving/rejecting, a newly-appearing
-    unapproved device is genuinely noteworthy.
+    Defaults to 'learning' — the quiet side. Failing quiet on a DB fault is
+    deliberate: failing loud would turn any transient error into an alert
+    flood, which trains operators to ignore the channel. The fault itself is
+    surfaced through the log.
     """
     try:
         cursor = await store.connection.execute(
-            "SELECT 1 FROM devices WHERE authorization IN ('approved','rejected') LIMIT 1",
+            "SELECT discovery_context FROM devices WHERE mac = ?", (mac,),
         )
-        return (await cursor.fetchone()) is not None
-    except Exception:
-        return False
+        row = await cursor.fetchone()
+    except Exception as exc:
+        logger.warning(
+            "discovery_context lookup failed for %s (%s); grading INFO", mac, exc
+        )
+        return "learning"
+    if row is None or row[0] is None:
+        return "learning"
+    return row[0]
 
 
 @register_rule("new_host")
@@ -71,18 +73,26 @@ class NewHostRule(RuleBase):
         # The pipeline transitions disposition to "known" after rules run,
         # so this will only fire once per host.
         if host.disposition == "new":
-            # Suppress new_host while the device is importer-sourced but not
-            # yet seen in live capture: an imported row on its own shouldn't
-            # trip alerts.
-            if not await _device_passively_observed(store, host.hw_addr):
-                return None
             auth = await _device_authorization(store, host.hw_addr)
-            sev = _AUTH_SEVERITY.get(auth, AlertSeverity.WARNING)
-            # Pre-baseline, an unapproved device is just inventory: don't
-            # raise a WARNING for every device on first deployment. Rejected
-            # devices stay CRITICAL regardless (explicit operator signal).
-            if auth == "unapproved" and not await _baseline_established(store):
+            context = await _device_discovery_context(store, host.hw_addr)
+
+            # Severity is decided by whether the sensor had learned the network
+            # when this device appeared. Authorization no longer grades noise --
+            # it records that a human vouched for the device's identity -- with
+            # the single exception of 'rejected', an explicit "not welcome here".
+            if auth == "rejected":
+                sev = AlertSeverity.CRITICAL
+            elif context == "learning":
                 sev = AlertSeverity.INFO
+            else:
+                sev = AlertSeverity.WARNING
+
+            # Importer-sourced devices not yet seen in live capture are graded
+            # down rather than suppressed: the window is a severity layer and
+            # never gates the data path, so the finding is still recorded.
+            if not await _device_passively_observed(store, host.hw_addr):
+                sev = AlertSeverity.INFO
+
             parts = [f"New host discovered: {host.hw_addr}"]
             if verdict.vendor:
                 parts.append(verdict.vendor)
@@ -92,8 +102,8 @@ class NewHostRule(RuleBase):
                 parts.append(host.ip_addr)
             if host.mac_randomized:
                 parts.append("randomized MAC")
-            if auth != "approved":
-                parts.append(f"authorization: {auth}")
+            if auth == "rejected":
+                parts.append("authorization: rejected")
             return Finding(
                 hw_addr=host.hw_addr,
                 rule=FindingRule.NEW_HOST,

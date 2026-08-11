@@ -93,29 +93,35 @@ async def test_new_host_rule_unsuppressed_after_flip(db, tmp_path):
     store = Store(str(db_path))
     await store.initialize()
     try:
+        from leetha.store.models import AlertSeverity
+
         mac = "aa:bb:cc:dd:ee:04"
-        # Importer adds the row
+        # Importer adds the row, on a sensor that has already learned the net.
         await db2.upsert_device(Device(
             mac=mac, first_seen=_now(), last_seen=_now(),
-            passively_observed=False,
+            passively_observed=False, discovery_context="monitored",
         ))
-        # Rule fires BEFORE packet: suppressed
         host = Host(hw_addr=mac, ip_addr="10.0.0.4", disposition="new")
         verdict = Verdict(
             hw_addr=mac, category="laptop", vendor="Apple",
             platform=None, platform_version=None, model=None, hostname=None,
             certainty=80, evidence_chain=[], computed_at=_now(),
         )
-        assert await NewHostRule().evaluate(host, verdict, store) is None
+        # BEFORE the packet: an imported row on its own is graded down to INFO
+        # rather than suppressed -- the finding still exists.
+        before = await NewHostRule().evaluate(host, verdict, store)
+        assert before is not None
+        assert before.severity == AlertSeverity.INFO
 
         # Packet arrives → flag flips via pipeline upsert
         await db2.upsert_device(Device(
             mac=mac, ip_v4="10.0.0.4",
             first_seen=_now(), last_seen=_now(),
         ))
-        # Now the rule should fire
-        finding = await NewHostRule().evaluate(host, verdict, store)
-        assert finding is not None
+        # AFTER: seen live on a learned network → a genuine new arrival.
+        after = await NewHostRule().evaluate(host, verdict, store)
+        assert after is not None
+        assert after.severity == AlertSeverity.WARNING
     finally:
         await store.close()
         await db2.close()
