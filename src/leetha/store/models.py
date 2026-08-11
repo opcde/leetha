@@ -63,6 +63,10 @@ class Device:
     is_online: bool = True
     offline_since: datetime | None = None
     presence_threshold_seconds: int = 300
+    # Automatic baseline — the sensor's learning state when this device was
+    # first discovered. Stamped once and never overwritten, so new_host
+    # severity cannot be re-graded by later upserts or window transitions.
+    discovery_context: str = "learning"  # 'learning' | 'monitored'
 
     def to_dict(self) -> dict:
         import re

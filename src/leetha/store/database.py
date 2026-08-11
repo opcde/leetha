@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS devices (
     passively_observed INTEGER NOT NULL DEFAULT 1,
     is_online          INTEGER NOT NULL DEFAULT 1,
     offline_since      TEXT,
-    presence_threshold_seconds INTEGER NOT NULL DEFAULT 300
+    presence_threshold_seconds INTEGER NOT NULL DEFAULT 300,
+    discovery_context  TEXT NOT NULL DEFAULT 'learning'
 );
 """
 
@@ -310,6 +311,7 @@ def _marshal_device(rec: aiosqlite.Row) -> Device:
             else None
         ),
         presence_threshold_seconds=int(_opt("presence_threshold_seconds") or 300),
+        discovery_context=_opt("discovery_context") or "learning",
     )
 
 
@@ -494,6 +496,11 @@ class Database:
              "ALTER TABLE devices ADD COLUMN offline_since TEXT"),
             ("presence_threshold_seconds",
              "ALTER TABLE devices ADD COLUMN presence_threshold_seconds INTEGER NOT NULL DEFAULT 300"),
+            # Automatic baseline — per-device discovery context. Existing rows
+            # backfill to 'learning': everything known at upgrade time is
+            # pre-existing inventory, not a new arrival.
+            ("discovery_context",
+             "ALTER TABLE devices ADD COLUMN discovery_context TEXT NOT NULL DEFAULT 'learning'"),
         ):
             if col_name not in dev_cols:
                 await self._conn.execute(col_sql)
@@ -604,7 +611,8 @@ INSERT INTO devices (
     raw_evidence, is_randomized_mac, correlated_mac,
     identity_id, manual_override,
     owner, location, criticality, tags, notes,
-    passively_observed, presence_threshold_seconds
+    passively_observed, presence_threshold_seconds,
+    discovery_context
 ) VALUES (
     ?1, ?2, ?3, ?4,
     ?5, ?6, ?7, ?8,
@@ -612,7 +620,8 @@ INSERT INTO devices (
     ?13, ?14, ?15,
     ?16, ?17,
     ?18, ?19, ?20, ?21, ?22,
-    ?23, ?24
+    ?23, ?24,
+    ?25
 )
 ON CONFLICT(mac) DO UPDATE SET
     hostname       = COALESCE(excluded.hostname, devices.hostname),
@@ -649,7 +658,11 @@ ON CONFLICT(mac) DO UPDATE SET
     presence_threshold_seconds = COALESCE(
         NULLIF(excluded.presence_threshold_seconds, 300),
         devices.presence_threshold_seconds
-    )
+    ),
+    -- discovery_context: stamped once at discovery, never overwritten. The
+    -- column is NOT NULL, so the existing value always wins the COALESCE —
+    -- first write is final, which is what keeps new_host grading stable.
+    discovery_context = COALESCE(devices.discovery_context, excluded.discovery_context)
 """
 
     @staticmethod
@@ -699,6 +712,7 @@ ON CONFLICT(mac) DO UPDATE SET
             dev.notes,
             int(dev.passively_observed),
             int(dev.presence_threshold_seconds),
+            dev.discovery_context or "learning",
         )
 
     async def upsert_device(self, device: Device) -> None:
