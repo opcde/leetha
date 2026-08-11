@@ -190,6 +190,7 @@ class Device:
             is_online=bool(_get("is_online", 26, 1) if _get("is_online", 26, 1) is not None else 1),
             offline_since=_dt_opt("offline_since", 27),
             presence_threshold_seconds=int(_get("presence_threshold_seconds", 28, 300) or 300),
+            discovery_context=_get("discovery_context", 29, "learning") or "learning",
         )
 
 
