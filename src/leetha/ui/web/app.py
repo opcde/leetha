@@ -29,6 +29,58 @@ web_dir = Path(__file__).parent
 app_instance: LeethaApp | None = None
 _auth_enabled: bool = False
 
+#: Seconds uvicorn may spend draining connections on shutdown.
+#:
+#: uvicorn's own default is None, i.e. wait forever. The dashboard keeps a
+#: websocket open for live device updates, so there is always at least one
+#: connection that will not close on its own -- which left Ctrl+C sitting on
+#: "Waiting for connections to close" until the user hammered it into a force
+#: quit. Bounding the drain makes shutdown terminate on its own.
+WEB_SHUTDOWN_TIMEOUT = 3
+
+#: Signalled when the server is shutting down, so streaming endpoints can stop
+#: waiting on an idle queue and close their connection.
+_web_shutdown = asyncio.Event()
+
+
+def get_web_shutdown_event() -> asyncio.Event:
+    return _web_shutdown
+
+
+async def _next_event_or_shutdown(queue, shutdown: asyncio.Event):
+    """Await the next event, or return None if shutdown is signalled first.
+
+    Streaming endpoints block on ``queue.get()``, which never returns on a
+    quiet network. Racing it against the shutdown event lets those connections
+    close promptly instead of holding the drain open.
+    """
+    if shutdown.is_set():
+        return None
+
+    get_task = asyncio.ensure_future(queue.get())
+    stop_task = asyncio.ensure_future(shutdown.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {get_task, stop_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if get_task in done:
+            return get_task.result()
+        return None
+    finally:
+        for task in (get_task, stop_task):
+            if not task.done():
+                task.cancel()
+
+
+def _build_uvicorn_config(*, app, host: str, port: int,
+                          ssl_keyfile, ssl_certfile) -> "uvicorn.Config":
+    """Build the uvicorn config, with a bounded shutdown drain."""
+    return uvicorn.Config(
+        app, host=host, port=port, log_level="info",
+        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+        timeout_graceful_shutdown=WEB_SHUTDOWN_TIMEOUT,
+    )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -3298,7 +3350,11 @@ async def websocket_endpoint(websocket: WebSocket):
     events = app_instance.subscribe()
     try:
         while True:
-            event = await events.get()
+            # Race the queue against shutdown: on a quiet network get() never
+            # returns, and uvicorn would wait on this connection forever.
+            event = await _next_event_or_shutdown(events, _web_shutdown)
+            if event is None:
+                break
             # Pass through import events directly
             if isinstance(event, dict) and event.get("type") in ("import_progress", "import_complete", "finding_created"):
                 await websocket.send_json(event)
@@ -3422,7 +3478,11 @@ async def websocket_console(websocket: WebSocket):
     events = app_instance.subscribe()
     try:
         while True:
-            event = await events.get()
+            # Race the queue against shutdown: on a quiet network get() never
+            # returns, and uvicorn would wait on this connection forever.
+            event = await _next_event_or_shutdown(events, _web_shutdown)
+            if event is None:
+                break
             # Pass through import events directly
             if isinstance(event, dict) and event.get("type") in ("import_progress", "import_complete", "finding_created"):
                 await websocket.send_json(event)
@@ -3731,7 +3791,8 @@ def run_web(interfaces: list | None = None, host: str = "0.0.0.0", port: int = 4
 
     logger.info("Leetha web UI: %s://%s:%d", scheme, host, port)
     uvicorn.run(_wrapped_app, host=host, port=port, log_level="info",
-                ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
+                ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+                timeout_graceful_shutdown=WEB_SHUTDOWN_TIMEOUT)
 
 
 async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", port: int = 443, app: LeethaApp | None = None, force_auth=None, tls: bool = True, tls_cert: str = "", tls_key: str = ""):
@@ -3768,9 +3829,14 @@ async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", p
             ssl_certfile = str(cert_path)
             ssl_keyfile = str(key_path)
 
-    config = uvicorn.Config(_wrapped_app, host=host, port=port, log_level="info",
-                            ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile)
+    config = _build_uvicorn_config(
+        app=_wrapped_app, host=host, port=port,
+        ssl_keyfile=ssl_keyfile, ssl_certfile=ssl_certfile,
+    )
     server = uvicorn.Server(config)
+    # Fresh run: clear any shutdown flag left by a previous `web` invocation
+    # from the console, otherwise streaming endpoints exit immediately.
+    _web_shutdown.clear()
     # Disable uvicorn's own signal handlers — the console manages SIGINT
     # and sets server.should_exit / force_exit directly.
     server.install_signal_handlers = lambda: None
@@ -3782,6 +3848,9 @@ async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", p
         server.should_exit = True
         server.force_exit = True
     finally:
+        # Release streaming endpoints blocked on an idle event queue so they
+        # do not hold the drain open.
+        _web_shutdown.set()
         _last_server = None
 
 _last_server: uvicorn.Server | None = None
