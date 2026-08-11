@@ -82,3 +82,54 @@ async def test_already_shut_down_returns_immediately():
         _next_event_or_shutdown(queue, shutdown), timeout=2.0
     )
     assert event is None
+
+
+@pytest.mark.asyncio
+async def test_watcher_signals_while_serving_not_after():
+    """The event must be set when should_exit flips, not when serve() returns.
+
+    Signalling from run_web_async's finally deadlocked: the drain waited on
+    connections, and the connections waited on an event set only after the
+    drain finished. The 3s timeout was the only thing breaking the circle.
+    """
+    from leetha.ui.web.app import _watch_server_exit
+
+    class FakeServer:
+        should_exit = False
+
+    server = FakeServer()
+    shutdown = asyncio.Event()
+    watcher = asyncio.ensure_future(_watch_server_exit(server, shutdown, poll=0.01))
+
+    await asyncio.sleep(0.05)
+    assert not shutdown.is_set()          # still serving
+
+    server.should_exit = True             # what one Ctrl+C does
+    await asyncio.wait_for(shutdown.wait(), timeout=2.0)
+    assert shutdown.is_set()
+    watcher.cancel()
+
+
+@pytest.mark.asyncio
+async def test_streaming_endpoint_unblocks_once_the_watcher_fires():
+    """End to end: an idle queue must release as soon as shutdown starts."""
+    from leetha.ui.web.app import _watch_server_exit, _next_event_or_shutdown
+
+    class FakeServer:
+        should_exit = False
+
+    server = FakeServer()
+    shutdown = asyncio.Event()
+    queue: asyncio.Queue = asyncio.Queue()   # deliberately never fed
+    watcher = asyncio.ensure_future(_watch_server_exit(server, shutdown, poll=0.01))
+
+    async def _flip():
+        await asyncio.sleep(0.05)
+        server.should_exit = True
+
+    asyncio.ensure_future(_flip())
+    event = await asyncio.wait_for(
+        _next_event_or_shutdown(queue, shutdown), timeout=2.0
+    )
+    assert event is None
+    watcher.cancel()

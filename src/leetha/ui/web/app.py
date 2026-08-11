@@ -72,6 +72,26 @@ async def _next_event_or_shutdown(queue, shutdown: asyncio.Event):
                 task.cancel()
 
 
+async def _watch_server_exit(server, shutdown: asyncio.Event,
+                             poll: float = 0.1) -> None:
+    """Set *shutdown* as soon as the server starts shutting down.
+
+    Signalling from run_web_async's ``finally`` was too late to be useful:
+    ``serve()`` does not return until the connection drain completes, and the
+    drain was waiting on the very connections that were waiting on this event.
+    Watching ``should_exit`` breaks that circle -- streaming endpoints learn
+    about the shutdown while there is still time to close cleanly, instead of
+    being cancelled when the timeout expires.
+    """
+    try:
+        while not getattr(server, "should_exit", False):
+            await asyncio.sleep(poll)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        shutdown.set()
+
+
 def _build_uvicorn_config(*, app, host: str, port: int,
                           ssl_keyfile, ssl_certfile) -> "uvicorn.Config":
     """Build the uvicorn config, with a bounded shutdown drain."""
@@ -3842,15 +3862,19 @@ async def run_web_async(interfaces: list | None = None, host: str = "0.0.0.0", p
     server.install_signal_handlers = lambda: None
     global _last_server
     _last_server = server
+    # Watch for shutdown *while* serving: the finally block below runs only
+    # after serve() returns, which is after the drain -- far too late to let
+    # streaming endpoints close in time to shorten it.
+    watcher = asyncio.ensure_future(_watch_server_exit(server, _web_shutdown))
     try:
         await server.serve()
     except (KeyboardInterrupt, asyncio.CancelledError):
         server.should_exit = True
         server.force_exit = True
     finally:
-        # Release streaming endpoints blocked on an idle event queue so they
-        # do not hold the drain open.
         _web_shutdown.set()
+        if not watcher.done():
+            watcher.cancel()
         _last_server = None
 
 _last_server: uvicorn.Server | None = None
