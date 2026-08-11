@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/select";
 import { fetchDevices, fetchFilterOptions, type Device } from "@/lib/api";
 import { DeviceDrawer } from "@/components/shared/DeviceDrawer";
-import { BaselineBanner } from "@/components/BaselineBanner";
 import { PresenceDot } from "@/components/PresenceDot";
 import { getDeviceTypeColor } from "@/lib/constants";
 import { cn } from "@/lib/utils";
@@ -124,6 +123,7 @@ export default function Devices({ subscribe }: DevicesProps) {
   const confidenceMin = searchParams.get("confidence_min") ?? "";
   const criticality = searchParams.get("criticality") ?? "";
   const authorization = searchParams.get("authorization") ?? "";
+  const discoveryContext = searchParams.get("discovery_context") ?? "";
   const isOnlineFilter = searchParams.get("is_online") ?? "";
 
   // Helper to update URL params
@@ -165,7 +165,7 @@ export default function Devices({ subscribe }: DevicesProps) {
   // Has any active filter?
   const hasFilters =
     q || deviceType || osFamily || manufacturer || statusFilter !== "all" || confidenceMin
-    || criticality || authorization || isOnlineFilter;
+    || criticality || authorization || discoveryContext || isOnlineFilter;
 
   // --- Fetch filter options ---
   const { data: filterOpts } = useQuery({
@@ -190,9 +190,10 @@ export default function Devices({ subscribe }: DevicesProps) {
       ...(confidenceMin ? { confidence_min: Number(confidenceMin) } : {}),
       ...(criticality ? { criticality } : {}),
       ...(authorization ? { authorization } : {}),
+      ...(discoveryContext ? { discovery_context: discoveryContext } : {}),
       ...(isOnlineFilter ? { is_online: isOnlineFilter === "true" } : {}),
     }),
-    [page, perPage, sort, order, q, deviceType, osFamily, manufacturer, statusFilter, confidenceMin, criticality, authorization, isOnlineFilter]
+    [page, perPage, sort, order, q, deviceType, osFamily, manufacturer, statusFilter, confidenceMin, criticality, authorization, discoveryContext, isOnlineFilter]
   );
 
   const { data: deviceData, isFetching, isError, error } = useQuery({
@@ -303,7 +304,6 @@ export default function Devices({ subscribe }: DevicesProps) {
         </div>
       </div>
 
-      <BaselineBanner />
 
       {/* Bulk action toolbar (Phase A.2 follow-up) */}
       {selectedMacs.size > 0 && (
@@ -515,6 +515,24 @@ export default function Devices({ subscribe }: DevicesProps) {
               <SelectItem value="approved">Approved</SelectItem>
               <SelectItem value="unapproved">Unapproved</SelectItem>
               <SelectItem value="rejected">Rejected</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Discovery context — was leetha still learning when this device
+              first appeared? This is what grades new_host severity. */}
+          <Select
+            value={discoveryContext || "__any__"}
+            onValueChange={(v) =>
+              setParam({ discovery_context: v === "__any__" ? "" : v, page: "1" })
+            }
+          >
+            <SelectTrigger size="sm" className="w-36 text-xs">
+              <SelectValue placeholder="Discovery" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__any__">Any Discovery</SelectItem>
+              <SelectItem value="learning">Found while learning</SelectItem>
+              <SelectItem value="monitored">Arrived after baseline</SelectItem>
             </SelectContent>
           </Select>
 
