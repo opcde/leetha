@@ -199,6 +199,16 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 );
 """
 
+_TABLE_SENSOR_STATE = """\
+CREATE TABLE IF NOT EXISTS sensor_state (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    first_capture_at  TEXT NOT NULL,
+    last_discovery_at TEXT NOT NULL,
+    window_closed_at  TEXT,
+    last_heartbeat_at TEXT
+);
+"""
+
 _ALL_TABLES = (
     _TABLE_DEVICES
     + _TABLE_OBSERVATIONS
@@ -212,6 +222,7 @@ _ALL_TABLES = (
     + _TABLE_SUPPRESSION_RULES
     + _TABLE_AUTH_TOKENS
     + _TABLE_AUTHORIZATION_HISTORY
+    + _TABLE_SENSOR_STATE
 )
 
 
@@ -853,6 +864,98 @@ ON CONFLICT(mac) DO UPDATE SET
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Sensor state — automatic baseline learning window
+    # ------------------------------------------------------------------
+
+    _SENSOR_STATE_COLUMNS = (
+        "first_capture_at", "last_discovery_at", "window_closed_at",
+        "last_heartbeat_at",
+    )
+
+    async def _seed_sensor_state(self) -> dict:
+        """Create the single sensor_state row.
+
+        On an upgraded install the sensor has been watching for a while, so
+        derive the window from observation history rather than stamping now().
+        Seeding first_capture_at to now() would restart the learning window and
+        silence genuinely new arrivals for a full window on every upgrade.
+        """
+        async with self._conn.execute(
+            "SELECT MIN(first_seen), MAX(first_seen) FROM devices "
+            "WHERE first_seen IS NOT NULL"
+        ) as cur:
+            row = await cur.fetchone()
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        first_capture = (row[0] if row else None) or now_iso
+        last_discovery = (row[1] if row else None) or now_iso
+
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO sensor_state "
+            "(id, first_capture_at, last_discovery_at, last_heartbeat_at) "
+            "VALUES (1, ?, ?, ?)",
+            (first_capture, last_discovery, now_iso),
+        )
+        await self._conn.commit()
+        return {
+            "first_capture_at": first_capture,
+            "last_discovery_at": last_discovery,
+            "window_closed_at": None,
+            "last_heartbeat_at": now_iso,
+        }
+
+    async def get_sensor_state(self) -> dict:
+        """Return the single sensor_state row, seeding it if absent."""
+        assert self._conn is not None
+        async with self._conn.execute(
+            "SELECT first_capture_at, last_discovery_at, window_closed_at, "
+            "last_heartbeat_at FROM sensor_state WHERE id = 1"
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            async with self._mu:
+                return await self._seed_sensor_state()
+        return dict(zip(self._SENSOR_STATE_COLUMNS, row))
+
+    async def _set_sensor_state(self, column: str, value: str | None) -> None:
+        """Update one sensor_state column, seeding the row first if needed."""
+        assert self._conn is not None
+        if column not in self._SENSOR_STATE_COLUMNS:
+            raise ValueError(f"unknown sensor_state column: {column}")
+        await self.get_sensor_state()
+        async with self._mu:
+            await self._conn.execute(
+                f"UPDATE sensor_state SET {column} = ? WHERE id = 1", (value,)
+            )
+            await self._conn.commit()
+
+    async def mark_discovery(self, *, at: datetime | None = None) -> None:
+        """Record that a never-before-seen MAC just appeared."""
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("last_discovery_at", stamp)
+
+    async def close_learning_window(self, *, at: datetime | None = None) -> None:
+        """Mark the network as learned. A no-op if already closed.
+
+        Devices are graded against this timestamp, so moving it on an
+        already-closed window would silently re-grade history.
+        """
+        state = await self.get_sensor_state()
+        if state["window_closed_at"] is not None:
+            return
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("window_closed_at", stamp)
+
+    async def reopen_learning_window(self) -> None:
+        """Re-enter learning (discovery burst, or a long sensor outage)."""
+        await self._set_sensor_state("window_closed_at", None)
+
+    async def record_heartbeat(self, *, at: datetime | None = None) -> None:
+        """Record that the sensor is alive, for outage detection on restart."""
+        stamp = (at or datetime.now(timezone.utc)).isoformat()
+        await self._set_sensor_state("last_heartbeat_at", stamp)
 
     async def baseline_reset(self, *, actor: str = "baseline") -> int:
         """Revert every device back to 'unapproved' and record history rows.
