@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Import smoke test** over every shipped module. A syntax error in
   `console.py` once passed the entire suite, because the interactive console is
   REPL- and signal-driven and no test imported it.
+- **Startup screen while leetha loads.** The dashboard is served immediately
+  while fingerprint indexes build on a background thread, so every `/api/`
+  route returns 503 for the first minute or two. The UI rendered anyway --
+  empty tables and failed requests, indistinguishable from a broken install.
+  It now waits on `/health` and explains what it is doing, and the login page
+  stays reachable throughout.
 - **Rapid7 Recog fingerprint sync source.** A curated set of Recog XML
   fingerprints (SSH, HTTP Server, FTP, SMTP, POP/IMAP, SNMP sysDescr, SMB
   native OS, NTP, SIP, MySQL) is now synced and consulted in the banner /

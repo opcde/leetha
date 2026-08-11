@@ -6,6 +6,7 @@ import { isAuthenticated } from "@/lib/auth";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { Shell } from "@/components/layout/Shell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { StartupGate } from "@/components/StartupGate";
 
 // Lazy-load all pages — only the visited page's code is downloaded
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
@@ -43,7 +44,11 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   if (authRequired && !isAuthenticated() && location.pathname !== "/login") {
     return <Navigate to="/login" replace />;
   }
-  return <>{children}</>;
+  // Signing in must stay possible while the capture engine warms up, so the
+  // login route bypasses the startup gate.
+  return (
+    <StartupGate bypass={location.pathname === "/login"}>{children}</StartupGate>
+  );
 }
 
 export default function App() {
