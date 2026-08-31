@@ -152,9 +152,9 @@ jobs:
           path: src/leetha/ui/web/dist/
       - run: |
           pip install . pyinstaller
-          pyinstaller --onefile --name leetha \
-          --add-data "src/leetha/patterns/data;leetha/patterns/data" \
-          --add-data "src/leetha/ui/web/dist;leetha/ui/web/dist" \
+          pyinstaller --onefile --name leetha `
+          --add-data "src/leetha/patterns/data;leetha/patterns/data" `
+          --add-data "src/leetha/ui/web/dist;leetha/ui/web/dist" `
           --paths src src/leetha/cli.py
       - uses: actions/upload-artifact@v6
         with:
